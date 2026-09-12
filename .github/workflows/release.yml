@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: petros-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_NAME: Petros
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate repository invariants
+        run: python tools/validate_source.py
+
+      - name: Test Python bridge
+        run: python python_code/selftest.py
+
+      - name: Setup HEMTT
+        uses: arma-actions/hemtt@v1
+        with:
+          version: "v1.21.0"
+
+      - name: Verify tag matches project version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('.hemtt/project.toml').read_text(encoding='utf-8'))
+          version = data['version']
+          print(f"{version['major']}.{version['minor']}.{version['patch']}")
+          PY
+          )"
+          test "$GITHUB_REF_NAME" = "v${VERSION}" || {
+            echo "Tag $GITHUB_REF_NAME doesn't match .hemtt/project.toml version $VERSION" >&2
+            exit 1
+          }
+          echo "MOD_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build signed release
+        run: hemtt release --no-archive
+
+      - name: Verify generated signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY="$(find .hemttout/release -type f -name '*.bikey' -print -quit)"
+          test -n "$KEY"
+          for PBO in .hemttout/release/addons/*.pbo; do
+            hemtt utils verify "$PBO" "$KEY"
+          done
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="releases/${RELEASE_NAME}-${MOD_VERSION}.zip"
+          mkdir -p ".hemttout/package/@${RELEASE_NAME}" releases
+          cp -a .hemttout/release/. ".hemttout/package/@${RELEASE_NAME}/"
+          (cd .hemttout/package && zip -qr "../../${ARCHIVE}" "@${RELEASE_NAME}")
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ARCHIVE="releases/${RELEASE_NAME}-${MOD_VERSION}.zip"
+          test -f "$ARCHIVE"
+          gh release create "$GITHUB_REF_NAME" "$ARCHIVE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

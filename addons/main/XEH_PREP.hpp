@@ -1,0 +1,11 @@
+PREP(formatDuration);
+PREP(getLocation);
+PREP(getSnapshot);
+PREP(handleCommand);
+PREP(monitorCampaign);
+PREP(pollCommands);
+PREP(postInit);
+PREP(startMonitoring);
+PREP(startRichPresence);
+PREP(stopRichPresence);
+PREP(updateRichPresence);

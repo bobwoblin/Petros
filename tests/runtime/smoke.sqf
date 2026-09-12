@@ -1,0 +1,33 @@
+// Run locally after normal Arma/CBA initialization with Petros and Pythia loaded.
+private _failures = [];
+private _check = {
+    params ["_name", "_ok"];
+    diag_log format ["[petros][TEST] %1 %2", ["FAIL", "PASS"] select _ok, _name];
+    if (!_ok) then {_failures pushBack _name};
+};
+
+["patch petros_main exists", isClass (configFile >> "CfgPatches" >> "petros_main")] call _check;
+{
+    [format ["function %1 exists", _x], !(isNil _x)] call _check;
+} forEach [
+    "petros_fnc_preStart",
+    "petros_fnc_formatDuration",
+    "petros_fnc_getLocation",
+    "petros_fnc_getSnapshot",
+    "petros_fnc_handleCommand",
+    "petros_fnc_monitorCampaign",
+    "petros_fnc_pollCommands",
+    "petros_fnc_postInit",
+    "petros_fnc_startMonitoring",
+    "petros_fnc_startRichPresence",
+    "petros_fnc_stopRichPresence",
+    "petros_fnc_updateRichPresence"
+];
+
+["rich presence config exists", isClass (configFile >> "CfgPetrosRichPresence")] call _check;
+
+private _preStart = configFile >> "CfgFunctions" >> "petros" >> "Bootstrap" >> "preStart";
+["preStart remains engine-registered", getNumber (_preStart >> "preStart") == 1] call _check;
+
+diag_log format ["[petros][TEST] COMPLETE failures=%1", count _failures];
+_failures

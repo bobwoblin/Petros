@@ -1,0 +1,19 @@
+# HEMTT
+.hemttout/
+releases/
+*.hemttprivatekey
+*.biprivatekey
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Petros local configuration
+python_code/config.local.py

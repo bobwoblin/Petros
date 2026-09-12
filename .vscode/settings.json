@@ -1,0 +1,20 @@
+{
+    "editor.detectIndentation": false,
+    "editor.insertSpaces": true,
+    "editor.tabSize": 4,
+    "editor.rulers": [
+        120
+    ],
+    "files.eol": "\n",
+    "files.insertFinalNewline": true,
+    "files.trimFinalNewlines": true,
+    "files.trimTrailingWhitespace": true,
+    "files.exclude": {
+        ".hemttout": true,
+        "releases": true
+    },
+    "search.exclude": {
+        ".hemttout": true,
+        "releases": true
+    }
+}

@@ -1,0 +1,41 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Validate",
+            "type": "shell",
+            "command": "python tools/validate_source.py && python python_code/selftest.py && hemtt check --pedantic",
+            "problemMatcher": [],
+            "group": "test"
+        },
+        {
+            "label": "HEMTT: Check",
+            "type": "shell",
+            "command": "hemtt check --pedantic",
+            "problemMatcher": [],
+            "group": "test"
+        },
+        {
+            "label": "HEMTT: Build",
+            "type": "shell",
+            "command": "hemtt build",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "HEMTT: Dev",
+            "type": "shell",
+            "command": "hemtt dev",
+            "problemMatcher": []
+        },
+        {
+            "label": "HEMTT: Release",
+            "type": "shell",
+            "command": "hemtt release",
+            "problemMatcher": []
+        }
+    ]
+}

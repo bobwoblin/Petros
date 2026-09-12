@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate repository invariants
+        run: python tools/validate_source.py
+
+      - name: Test Python bridge
+        run: python python_code/selftest.py
+
+      - name: Setup HEMTT
+        uses: arma-actions/hemtt@v1
+        with:
+          version: "v1.21.0"
+
+      - name: HEMTT check
+        run: hemtt check --pedantic
+
+      - name: HEMTT build
+        run: hemtt build

@@ -1,0 +1,20 @@
+name = "Petros"
+author = "Bobby"
+prefix = "petros"
+mainprefix = "x"
+
+[version]
+major = 0
+minor = 1
+patch = 0
+git_hash = 0
+
+[properties]
+author = "Bobby"
+
+[signing]
+authority = "Bobby"
+
+[files]
+include = ["README.md", "LICENSE", "python_code/$PYTHIA$", "python_code/__init__.py", "python_code/config.example.py", "python_code/presentation.py"]
+exclude = ["**/*.biprivatekey", "python_code/config.local.py"]

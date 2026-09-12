@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.paa binary
+*.ogg binary
+*.wss binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.bikey binary
+*.biprivatekey binary
+*.hemttprivatekey binary
