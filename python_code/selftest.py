@@ -48,13 +48,16 @@ class FakeSocket:
 
 
 class FakePresencePipe:
-    def __init__(self, responses=b"", max_write=None):
+    def __init__(self, responses=b"", max_write=None, max_read=None):
         self.responses = bytearray(responses)
         self.writes = []
         self.closed = False
         self.max_write = max_write
+        self.max_read = max_read
 
     def read(self, size):
+        if self.max_read is not None:
+            size = min(size, self.max_read)
         if not self.responses:
             return b""
         chunk = bytes(self.responses[:size])
@@ -128,6 +131,7 @@ class PetrosSelfTest(unittest.TestCase):
         PETROS._presence_started_at = 0
         PETROS._presence_requested = None
         PETROS._presence_last_activity = None
+        PETROS._presence_diagnostics.clear()
         PETROS._bot_campaign = None
         self.cfg = dict(PETROS._DEFAULTS)
         self.cfg.update({
@@ -152,13 +156,13 @@ class PetrosSelfTest(unittest.TestCase):
 
 
     def test_rich_presence_ipc_payload(self):
-        ready = PETROS._presence_frame(1, {"evt": "READY"})
+        ready = PETROS._presence_frame(1, {"cmd": "DISPATCH", "evt": "READY"})
         updated = PETROS._presence_frame(1, {"cmd": "SET_ACTIVITY", "nonce": "1000000000", "data": {}})
         pipe = FakePresencePipe(ready + updated)
         with patch.object(PETROS, "_presence_open_pipe", return_value=pipe), \
                 patch.object(PETROS.time, "time", return_value=1000.0), \
                 patch.object(PETROS.time, "time_ns", return_value=1000000000), \
-                patch.object(PETROS, "_presence_thread", object()):
+                patch.object(PETROS, "_presence_thread", Mock(is_alive=Mock(return_value=True))):
             self.assertTrue(PETROS.update_presence(
                 "123456789012345678",
                 "Antistasi Ultimate",
@@ -178,6 +182,8 @@ class PetrosSelfTest(unittest.TestCase):
 
         opcode, update = decode_presence_frame(pipe.writes[1])
         self.assertEqual(opcode, 1)
+        self.assertEqual(update["args"]["pid"], PETROS.os.getpid())
+        self.assertEqual(update["nonce"], "1000000000")
         activity = update["args"]["activity"]
         self.assertEqual(activity["details"], "Antistasi Ultimate")
         self.assertEqual(activity["state"], "Kujari • 3/8 players")
@@ -213,7 +219,7 @@ class PetrosSelfTest(unittest.TestCase):
                 patch.object(PETROS, "__file__", str(Path(directory) / "__init__.py")), \
                 patch.object(PETROS, "_config", dict(PETROS._DEFAULTS)), \
                 patch.object(PETROS, "_presentation", PETROS._presentation), \
-                patch.object(PETROS, "_presence_thread", object()), \
+                patch.object(PETROS, "_presence_thread", Mock(is_alive=Mock(return_value=True))), \
                 patch.object(PETROS.time, "time_ns", return_value=7):
             Path(directory, "presentation.py").write_text("", encoding="utf-8")
             # Change only operator configuration, through the real existing loader.
@@ -231,7 +237,7 @@ class PetrosSelfTest(unittest.TestCase):
                 self.assertNotIn(config["APPLICATION_ID"], public)
                 # SQF supplies live details/state/counts alongside the public fields.
                 self.assertTrue(PETROS.update_presence(public[0], public[2], "Kujari", 3, 8, *public[3:]))
-                pipe = FakePresencePipe(PETROS._presence_frame(1, {"evt": "READY"}) +
+                pipe = FakePresencePipe(PETROS._presence_frame(1, {"cmd": "DISPATCH", "evt": "READY"}) +
                                         PETROS._presence_frame(1, {"cmd": "SET_ACTIVITY", "nonce": "7"}))
                 with patch.object(PETROS, "_presence_open_pipe", return_value=pipe):
                     PETROS._presence_sync(*PETROS._presence_requested)
@@ -300,7 +306,7 @@ class PetrosSelfTest(unittest.TestCase):
         self.assertEqual(tracked.stdout.strip(), "python_code/config.example.py")
 
     def test_presence_deduplication_reconnect_and_clear(self):
-        ready = PETROS._presence_frame(1, {"evt": "READY"})
+        ready = PETROS._presence_frame(1, {"cmd": "DISPATCH", "evt": "READY"})
         ack = PETROS._presence_frame(1, {"cmd": "SET_ACTIVITY", "nonce": "7"})
         pong = PETROS._presence_frame(4, {"nonce": "7"})
         pipe = FakePresencePipe(ready + ack + pong + ack + ack)
@@ -322,7 +328,9 @@ class PetrosSelfTest(unittest.TestCase):
                 self.assertEqual(len(replacement.writes), 2)
 
     def test_presence_protocol_errors_and_ping(self):
-        for opcode, payload in [(2, {}), (1, []), (1, {"evt": "ERROR"}), (1, {"evt": "OTHER"})]:
+        for opcode, payload in [(2, {"code": 4000, "message": "closed"}), (1, []),
+                                (1, {"evt": "ERROR"}), (1, {"evt": "OTHER"}),
+                                (1, {"evt": "READY"}), (1, {"cmd": "SET_ACTIVITY", "evt": "READY"})]:
             with self.subTest(opcode=opcode, payload=payload):
                 pipe = FakePresencePipe(PETROS._presence_frame(opcode, payload))
                 with self.assertRaises((OSError, ValueError)):
@@ -341,28 +349,149 @@ class PetrosSelfTest(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "timed out"):
                 PETROS._presence_write_all(FakePresencePipe(max_write=0), b"x")
 
-    def test_presence_worker_unavailable_and_cleanup(self):
-        # One real worker; replace only its transport, not a Discord environment.
+    def test_presence_frames_and_acknowledgements(self):
+        raw = b'{"v":1,"client_id":"123456789012345678"}'
+        self.assertEqual(PETROS._presence_frame(0, {"v": 1, "client_id": "123456789012345678"}),
+                         b'\x00\x00\x00\x00' + len(raw).to_bytes(4, "little") + raw)
+        ready = PETROS._presence_frame(1, {"cmd": "DISPATCH", "evt": "READY"})
+        pipe = FakePresencePipe(ready, max_read=1)
+        PETROS._presence_response(pipe)
+        self.assertFalse(pipe.responses)
+        for payload in ({"cmd": "SET_ACTIVITY", "nonce": "wrong"},
+                        {"cmd": "OTHER", "nonce": "7"},
+                        {"cmd": "SET_ACTIVITY", "nonce": "7", "evt": "READY"},
+                        {"cmd": "SET_ACTIVITY", "nonce": "7", "evt": "ERROR", "data": {"message": "bad activity"}}):
+            with self.subTest(payload=payload), self.assertRaises((OSError, ValueError)):
+                PETROS._presence_response(FakePresencePipe(PETROS._presence_frame(1, payload)), "7")
+        with self.assertRaisesRegex(OSError, "bad activity"):
+            PETROS._presence_response(FakePresencePipe(PETROS._presence_frame(2, {"message": "bad activity"})))
+        with self.assertRaisesRegex(OSError, "too large"):
+            PETROS._presence_response(FakePresencePipe(struct.pack("<II", 1, 1024 * 1024 + 1)))
+        with self.assertRaisesRegex(OSError, "closed"):
+            PETROS._presence_response(FakePresencePipe(ready[:-1]))
+        with self.assertRaises(ValueError):
+            PETROS._presence_response(FakePresencePipe(struct.pack("<II", 1, 1) + b"{"))
+        pong = b"\x00\xffopaque"
+        pipe = FakePresencePipe(struct.pack("<II", 3, len(pong)) + pong +
+                                struct.pack("<II", 4, len(pong)) + pong, max_read=2)
+        PETROS._presence_response(pipe, pong, pong=True)
+        self.assertEqual(pipe.writes, [struct.pack("<II", 4, len(pong)) + pong])
+
+    @unittest.skipUnless(PETROS.sys.platform == "win32", "requires real Windows named pipes")
+    def test_presence_native_pipe_delayed_io_and_probing(self):
+        # A real kernel pipe, not FakePresencePipe or Discord. Also run under Pythia's Python 3.10.
+        import ctypes
+        from ctypes import wintypes
         import threading
-        cleared = threading.Event()
-        attempted = threading.Event()
-        def unavailable(*args):
-            attempted.set()
-            raise OSError("Discord is closed")
-        def close():
-            cleared.set()
-        with patch.object(PETROS, "_presence_sync", side_effect=unavailable), \
-                patch.object(PETROS, "_presence_close_locked", side_effect=close), \
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [wintypes.LPVOID]
+        kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        path = r"\\.\pipe\petros-selftest-" + str(PETROS.os.getpid())
+        server = kernel32.CreateNamedPipeW(path, 3, 1, 1, 4096, 4096, 0, None)
+        self.assertNotEqual(server, wintypes.HANDLE(-1).value)
+        real_open = open
+        paths = []
+        def open_test_pipe(name, *args, **kwargs):
+            paths.append(name)
+            if name.endswith("-0"):
+                raise FileNotFoundError(name)
+            if name.endswith("-1"):
+                raise OSError("pipe busy")
+            return real_open(path, *args, **kwargs)
+        pipe = None
+        writer = None
+        try:
+            with patch("builtins.open", side_effect=open_test_pipe):
+                pipe = PETROS._presence_open_pipe()
+            self.assertEqual(paths, [r"\\?\pipe\discord-ipc-" + str(i) for i in range(3)])
+            with self.assertRaises(OSError) as empty:
+                pipe.read(8)
+            self.assertEqual(empty.exception.winerror, 232)  # CRT/Python 3.10 used to lose this.
+            frame = PETROS._presence_frame(1, {"cmd": "DISPATCH", "evt": "READY"})
+            count = wintypes.DWORD()
+            writes = []
+            writer = threading.Timer(0.05, lambda: writes.append(
+                pipe.kernel32.WriteFile(server, frame, len(frame), ctypes.byref(count), None)))
+            writer.start()
+            PETROS._presence_response(pipe)
+            writer.join(1)
+            self.assertEqual(writes, [1])
+            self.assertEqual(count.value, len(frame))
+            PETROS._presence_write_all(pipe, frame)
+            buffer = ctypes.create_string_buffer(len(frame))
+            self.assertTrue(pipe.kernel32.ReadFile(server, buffer, len(frame), ctypes.byref(count), None))
+            self.assertEqual(buffer.raw[:count.value], frame)
+        finally:
+            if writer is not None:
+                writer.join(1)
+            if pipe is not None:
+                pipe.close()
+            kernel32.CloseHandle(server)
+
+    def test_presence_worker_unavailable_and_cleanup(self):
+        PETROS._presence_requested = ("123456789012345678", {"details": "Antistasi"})
+        attempts = [OSError("Discord IPC pipe not found"), OSError("Discord IPC pipe not found"),
+                    OSError("Discord handshake failed: timeout"), None]
+        def sync(*args):
+            error = attempts.pop(0)
+            if error:
+                raise error
+            PETROS.clear_presence()
+        with patch.object(PETROS, "_presence_sync", side_effect=sync), \
+                patch.object(PETROS.time, "monotonic", side_effect=range(0, 1000, 20)), \
+                patch.object(PETROS, "_presence_wake", Mock(wait=Mock(side_effect=RuntimeError("test exit")))), \
                 patch.object(PETROS, "_log") as log:
-            self.assertTrue(PETROS.update_presence("123456789012345678", "Antistasi"))
-            self.assertTrue(attempted.wait(1))
-            self.assertTrue(cleared.wait(1))
-            cleared.clear()
-            self.assertTrue(PETROS.clear_presence())
-            self.assertTrue(cleared.wait(1))
+            PETROS._presence_worker()
             self.assertIsNone(PETROS._presence_requested)
             self.assertEqual(PETROS._presence_started_at, 0)
-            self.assertTrue(log.called)
+            messages = [call.args[0] for call in log.call_args_list]
+            self.assertEqual(messages.count("Discord IPC pipe not found"), 1)
+            self.assertIn("Discord handshake failed: timeout", messages)
+            self.assertIn("Rich Presence recovered; Discord activity accepted", messages)
+
+    def test_presence_worker_restart_and_no_duplicates(self):
+        import threading
+        entered = threading.Event()
+        release = threading.Event()
+        pipe = FakePresencePipe()
+        def crash(*args):
+            PETROS._presence_pipe = pipe
+            entered.set()
+            release.wait(2)
+            raise RuntimeError("unexpected transport failure")
+        with patch.object(PETROS, "_presence_thread", None), \
+                patch.object(PETROS, "_presence_wake", threading.Event()), \
+                patch.object(PETROS, "_presence_sync", side_effect=crash) as sync, \
+                patch.object(PETROS, "_log") as log:
+            previous = None
+            for attempt in range(2):
+                entered.clear()
+                release.clear()
+                self.assertTrue(PETROS.update_presence("123456789012345678", "Antistasi"))
+                worker = PETROS._presence_thread
+                try:
+                    self.assertIsNot(worker, previous)
+                    self.assertTrue(entered.wait(1))
+                    # Callers complete while IPC is blocked; the lock also serializes simultaneous starts.
+                    callers = [threading.Thread(target=PETROS.update_presence, args=("123456789012345678",))
+                               for _ in range(8)]
+                    for caller in callers:
+                        caller.start()
+                    for caller in callers:
+                        caller.join(1)
+                        self.assertFalse(caller.is_alive())
+                    self.assertIs(PETROS._presence_thread, worker)
+                    self.assertEqual(sync.call_count, attempt + 1)
+                finally:
+                    release.set()
+                    worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertTrue(pipe.closed)
+                self.assertIsNone(PETROS._presence_pipe)
+                previous = worker
+            messages = [call.args[0] for call in log.call_args_list]
+            self.assertEqual(messages.count("Rich Presence worker failed: RuntimeError: unexpected transport failure"), 1)
 
     def test_presence_optional_assets_and_input(self):
         self.assertNotIn("assets", PETROS._presence_activity("a", "b", 0, 8, "", "Example"))

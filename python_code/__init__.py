@@ -2,6 +2,8 @@
 
 from collections import deque
 import base64
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -129,7 +131,40 @@ _presence_requested = None
 _presence_thread = None
 _presence_wake = threading.Event()
 _presence_last_activity = None
+_presence_diagnostics = {}
 _bot_campaign = None
+
+
+def _presence_log(stage, message):
+    if _presence_diagnostics.get(stage) != message:
+        _log(message)
+        _presence_diagnostics[stage] = message
+
+
+class _PresencePipe:
+    """Keep CRT file ownership, but preserve Win32 pipe errors and byte counts."""
+
+    def __init__(self, pipe, handle, kernel32):
+        self.pipe = pipe
+        self.handle = handle
+        self.kernel32 = kernel32
+
+    def read(self, size):
+        buffer = ctypes.create_string_buffer(size)
+        count = wintypes.DWORD()
+        if not self.kernel32.ReadFile(self.handle, buffer, size, ctypes.byref(count), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return buffer.raw[:count.value]
+
+    def write(self, data):
+        data = bytes(data)
+        count = wintypes.DWORD()
+        if not self.kernel32.WriteFile(self.handle, data, len(data), ctypes.byref(count), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return count.value
+
+    def close(self):
+        self.pipe.close()
 
 
 def _presence_frame(opcode, payload):
@@ -190,45 +225,61 @@ def _presence_response(pipe, nonce=None, pong=False):
             return
         if opcode == 4:
             continue
+        if opcode == 2:
+            raise OSError("Discord IPC CLOSE: " + _clip(raw.decode("utf-8", errors="replace"), 256))
         if opcode != 1:
-            raise OSError("Discord IPC closed or sent an invalid opcode")
+            raise OSError("Discord IPC invalid opcode: " + str(opcode))
         response = json.loads(raw.decode("utf-8"))
         if not isinstance(response, dict):
             raise ValueError("Invalid Discord IPC response")
         if response.get("evt") == "ERROR":
             raise OSError("Discord RPC rejected request: " + _clip(response.get("data"), 256))
         if nonce is None:
-            if response.get("evt") != "READY":
-                raise OSError("Discord IPC handshake did not return READY")
+            if response.get("cmd") != "DISPATCH" or response.get("evt") != "READY":
+                raise OSError("Discord IPC handshake did not return DISPATCH READY")
             return
         if not pong and response.get("nonce") == nonce and response.get("cmd") == "SET_ACTIVITY":
+            if response.get("evt") is not None:
+                raise ValueError("Invalid Discord SET_ACTIVITY acknowledgement")
             return
 
 
 def _presence_open_pipe():
     if sys.platform != "win32":
         raise OSError("Discord Rich Presence is supported on Windows clients")
-    import ctypes
     import msvcrt
-    from ctypes import wintypes
 
-    set_state = ctypes.WinDLL("kernel32", use_last_error=True).SetNamedPipeHandleState
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_state = kernel32.SetNamedPipeHandleState
     set_state.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
                          ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
     set_state.restype = wintypes.BOOL
+    for operation in (kernel32.ReadFile, kernel32.WriteFile):
+        operation.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                              ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        operation.restype = wintypes.BOOL
+    last_error = None
     for index in range(10):
         path = r"\\?\pipe\discord-ipc-{}".format(index)
         try:
             pipe = open(path, "r+b", buffering=0)
-        except OSError:
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError):
+                last_error = exc
             continue
+        handle = msvcrt.get_osfhandle(pipe.fileno())
         mode = wintypes.DWORD(1)  # PIPE_READMODE_BYTE | PIPE_NOWAIT
-        if not set_state(msvcrt.get_osfhandle(pipe.fileno()), ctypes.byref(mode), None, None):
+        if not set_state(handle, ctypes.byref(mode), None, None):
             error = ctypes.WinError(ctypes.get_last_error())
             pipe.close()
-            raise error
-        return pipe
-    raise OSError("Discord IPC pipe was not found")
+            raise OSError("Discord IPC setup failed: " + str(error)) from error
+        # Python 3.10 FileIO turns ERROR_NO_DATA into EINVAL without winerror.
+        # Native I/O keeps NOWAIT polling and deadlines independent of the CRT.
+        _presence_log("pipe", "Discord IPC connected: discord-ipc-" + str(index))
+        return _PresencePipe(pipe, handle, kernel32)
+    if last_error is not None:
+        raise OSError("Discord IPC open failed: " + str(last_error)) from last_error
+    raise OSError("Discord IPC pipe not found")
 
 
 def _presence_close_locked():
@@ -253,14 +304,17 @@ def _presence_connect_locked(application_id):
     try:
         _presence_write_all(pipe, _presence_frame(0, {"v": 1, "client_id": application_id}))
         _presence_response(pipe)
-    except (OSError, ValueError):
+    except Exception as exc:
         try:
             pipe.close()
         except OSError:
             pass
+        if isinstance(exc, (OSError, ValueError)):
+            raise OSError("Discord handshake failed: " + str(exc)) from exc
         raise
     _presence_pipe = pipe
     _presence_application_id = application_id
+    _presence_log("handshake", "Discord handshake accepted")
 
 
 def _presence_activity(details, state, current, maximum, large_image, large_text, small_image="", small_text=""):
@@ -299,8 +353,12 @@ def _presence_send_locked(activity):
         "args": {"pid": os.getpid(), "activity": activity},
         "nonce": str(time.time_ns()),
     }
-    _presence_write_all(_presence_pipe, _presence_frame(1, payload))
-    _presence_response(_presence_pipe, payload["nonce"])
+    try:
+        _presence_write_all(_presence_pipe, _presence_frame(1, payload))
+        _presence_response(_presence_pipe, payload["nonce"])
+    except (OSError, ValueError) as exc:
+        raise OSError("Discord activity failed: " + str(exc)) from exc
+    _presence_log("activity", "Discord activity cleared" if activity is None else "Discord activity accepted")
 
 
 def _presence_sync(application_id, activity):
@@ -311,43 +369,48 @@ def _presence_sync(application_id, activity):
         _presence_last_activity = activity
     else:
         ping = _presence_frame(3, {"nonce": str(time.time_ns())})
-        _presence_write_all(_presence_pipe, ping)
-        _presence_response(_presence_pipe, ping[8:], pong=True)
+        try:
+            _presence_write_all(_presence_pipe, ping)
+            _presence_response(_presence_pipe, ping[8:], pong=True)
+        except (OSError, ValueError) as exc:
+            raise OSError("Discord IPC disconnected: " + str(exc)) from exc
 
 
 def _presence_worker():
-    failed = False
     next_update = 0.0
-    while True:
-        with _presence_lock:
-            requested = _presence_requested
-            _presence_wake.clear()
-        if requested is None:
+    try:
+        _presence_log("worker", "Rich Presence worker started")
+        while True:
+            with _presence_lock:
+                requested = _presence_requested
+                _presence_wake.clear()
+            if requested is None:
+                try:
+                    if _presence_pipe is not None:
+                        _presence_send_locked(None)
+                except (OSError, ValueError) as exc:
+                    _presence_log("error", "Rich Presence clear failed: " + str(exc))
+                finally:
+                    _presence_close_locked()
+                next_update = 0.0
+                _presence_wake.wait()
+                continue
+            delay = next_update - time.monotonic()
+            if delay > 0:
+                _presence_wake.wait(delay)
+                continue
             try:
-                if _presence_pipe is not None:
-                    _presence_send_locked(None)
+                _presence_sync(*requested)
+                if _presence_diagnostics.pop("error", None) is not None:
+                    _log("Rich Presence recovered; Discord activity accepted")
             except (OSError, ValueError) as exc:
-                _log("Rich Presence clear failed: " + str(exc))
-            finally:
                 _presence_close_locked()
-            next_update = 0.0
-            _presence_wake.wait()
-            continue
-        delay = next_update - time.monotonic()
-        if delay > 0:
-            _presence_wake.wait(delay)
-            continue
-        try:
-            _presence_sync(*requested)
-            if failed:
-                _log("Rich Presence connected")
-            failed = False
-        except (OSError, ValueError) as exc:
-            _presence_close_locked()
-            if not failed:
-                _log("Rich Presence unavailable: " + str(exc))
-            failed = True
-        next_update = time.monotonic() + 15.0
+                _presence_log("error", str(exc))
+            next_update = time.monotonic() + 15.0
+    except Exception as exc:
+        _presence_log("error", "Rich Presence worker failed: " + type(exc).__name__ + ": " + str(exc))
+    finally:
+        _presence_close_locked()
 
 
 def _log(message):
@@ -1554,7 +1617,7 @@ def update_presence(
         )
         _presence_requested = (application_id, activity)
         _presence_wake.set()
-        if _presence_thread is None:
+        if _presence_thread is None or not _presence_thread.is_alive():
             _presence_thread = threading.Thread(target=_presence_worker, name="Petros IPC", daemon=True)
             _presence_thread.start()
     return True
