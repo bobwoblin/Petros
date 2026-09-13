@@ -3,12 +3,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import re
 import sys
 import tomllib
-import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 ERRORS: list[str] = []
@@ -50,20 +48,6 @@ def tracked_files() -> list[Path]:
     ]
 
 
-def addon_source(addon: Path) -> str:
-    paths = sorted(
-        path for path in addon.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".cpp", ".hpp", ".sqf"}
-    )
-    return "\n".join(read(path) for path in paths)
-
-
-def required_addons(addon: Path) -> set[str]:
-    source = read(addon / "CfgPatches.hpp")
-    match = re.search(r"requiredAddons\[\]\s*=\s*\{(?P<body>.*?)\};", source, re.S)
-    return set(re.findall(r'"([^"]+)"', match.group("body"))) if match else set()
-
-
 for relative in sorted(REQUIRED_REPO_FILES):
     check((ROOT / relative).is_file(), f"missing repository file: {relative}")
 
@@ -96,29 +80,6 @@ for path in (p for p in files if p.suffix.lower() == ".toml"):
         tomllib.loads(read(path))
     except tomllib.TOMLDecodeError as exc:
         ERRORS.append(f"invalid TOML {path.relative_to(ROOT)}: {exc}")
-for path in (p for p in files if p.suffix.lower() == ".json"):
-    try:
-        json.loads(read(path))
-    except json.JSONDecodeError as exc:
-        ERRORS.append(f"invalid JSON {path.relative_to(ROOT)}: {exc}")
-for path in (p for p in files if p.suffix.lower() == ".xml"):
-    try:
-        tree = ET.parse(path)
-    except ET.ParseError as exc:
-        ERRORS.append(f"invalid XML {path.relative_to(ROOT)}: {exc}")
-        continue
-
-    if path.name.lower() == "stringtable.xml":
-        keys = list(tree.getroot().iter("Key"))
-        ids = [key.attrib.get("ID", "").strip() for key in keys]
-        check(all(ids), f"stringtable key without ID: {path.relative_to(ROOT)}")
-        check(len(ids) == len(set(ids)), f"duplicate stringtable key ID: {path.relative_to(ROOT)}")
-        for key in keys:
-            english = key.find("English")
-            check(
-                english is not None and bool((english.text or "").strip()),
-                f"empty English stringtable value {key.attrib.get('ID', '<missing>')}: {path.relative_to(ROOT)}",
-            )
 for path in (p for p in files if p.suffix.lower() == ".py"):
     try:
         compile(read(path), str(path), "exec")

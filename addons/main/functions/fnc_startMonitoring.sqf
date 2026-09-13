@@ -53,4 +53,6 @@ addMissionEventHandler ["PlayerDisconnected", {
     ["Players", str (count (allPlayers - entities "HeadlessClient_F")), true]
 ]]] call py3_fnc_callExtension;
 
+call FUNC(monitorCampaign);
+
 GVAR(campaignMonitorPFH) = [{call FUNC(monitorCampaign)}, CAMPAIGN_MONITOR_INTERVAL] call CBA_fnc_addPerFrameHandler;

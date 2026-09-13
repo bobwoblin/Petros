@@ -74,6 +74,17 @@ _DEFAULTS = {
     "COMMAND_CHANNEL_ID": "",
     "EVENT_CHANNEL_ID": "",
     "SERVER_NAME": "Antistasi Server",
+    "RICH_PRESENCE_ENABLED": False,
+    "RICH_PRESENCE_APPLICATION_ID": "",
+    "RICH_PRESENCE_UPDATE_INTERVAL": 15,
+    "RICH_PRESENCE_DETAILS": "Antistasi Ultimate",
+    "RICH_PRESENCE_LARGE_IMAGE_KEY": "",
+    "RICH_PRESENCE_LARGE_IMAGE_TEXT": "",
+    "RICH_PRESENCE_SMALL_IMAGE_KEY": "",
+    "RICH_PRESENCE_SMALL_IMAGE_TEXT": "",
+    "BOT_PRESENCE_STATUS": "online",
+    "BOT_PRESENCE_ACTIVITY_TYPE": 0,
+    "BOT_PRESENCE_TEXT": "",
     "RCON_PORT": 2301,
     "RCON_PASSWORD": "",
     "ADMIN_USER_IDS": [],
@@ -114,6 +125,11 @@ _presence_lock = threading.Lock()
 _presence_pipe = None
 _presence_application_id = ""
 _presence_started_at = 0
+_presence_requested = None
+_presence_thread = None
+_presence_wake = threading.Event()
+_presence_last_activity = None
+_bot_campaign = None
 
 
 def _presence_frame(opcode, payload):
@@ -121,10 +137,20 @@ def _presence_frame(opcode, payload):
     return struct.pack("<II", int(opcode), len(raw)) + raw
 
 
-def _presence_read_exact(pipe, size):
+def _presence_read_exact(pipe, size, deadline):
     data = bytearray()
     while len(data) < size:
-        chunk = pipe.read(size - len(data))
+        if time.monotonic() >= deadline:
+            raise OSError("Discord IPC response timed out")
+        try:
+            chunk = pipe.read(size - len(data))
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 232:  # PIPE_NOWAIT: no data yet
+                raise
+            chunk = None
+        if chunk is None:
+            time.sleep(0.01)
+            continue
         if not chunk:
             raise OSError("Discord IPC pipe closed")
         data.extend(chunk)
@@ -134,38 +160,83 @@ def _presence_read_exact(pipe, size):
 def _presence_write_all(pipe, data):
     view = memoryview(data)
     offset = 0
+    deadline = time.monotonic() + 2.0
     while offset < len(view):
+        if time.monotonic() >= deadline:
+            raise OSError("Discord IPC write timed out")
         written = pipe.write(view[offset:])
         if not written:
-            raise OSError("Discord IPC pipe write failed")
+            time.sleep(0.01)
+            continue
         offset += written
 
 
-def _presence_read_frame(pipe):
-    opcode, size = struct.unpack("<II", _presence_read_exact(pipe, 8))
+def _presence_read_frame(pipe, deadline):
+    opcode, size = struct.unpack("<II", _presence_read_exact(pipe, 8, deadline))
     if size > 1024 * 1024:
         raise OSError("Discord IPC response is too large")
-    payload = json.loads(_presence_read_exact(pipe, size).decode("utf-8"))
+    payload = _presence_read_exact(pipe, size, deadline)
     return opcode, payload
+
+
+def _presence_response(pipe, nonce=None, pong=False):
+    deadline = time.monotonic() + 2.0
+    while True:
+        opcode, raw = _presence_read_frame(pipe, deadline)
+        if opcode == 3:
+            _presence_write_all(pipe, struct.pack("<II", 4, len(raw)) + raw)
+            continue
+        if pong and opcode == 4 and raw == nonce:
+            return
+        if opcode == 4:
+            continue
+        if opcode != 1:
+            raise OSError("Discord IPC closed or sent an invalid opcode")
+        response = json.loads(raw.decode("utf-8"))
+        if not isinstance(response, dict):
+            raise ValueError("Invalid Discord IPC response")
+        if response.get("evt") == "ERROR":
+            raise OSError("Discord RPC rejected request: " + _clip(response.get("data"), 256))
+        if nonce is None:
+            if response.get("evt") != "READY":
+                raise OSError("Discord IPC handshake did not return READY")
+            return
+        if not pong and response.get("nonce") == nonce and response.get("cmd") == "SET_ACTIVITY":
+            return
 
 
 def _presence_open_pipe():
     if sys.platform != "win32":
         raise OSError("Discord Rich Presence is supported on Windows clients")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    set_state = ctypes.WinDLL("kernel32", use_last_error=True).SetNamedPipeHandleState
+    set_state.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+                         ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)]
+    set_state.restype = wintypes.BOOL
     for index in range(10):
         path = r"\\?\pipe\discord-ipc-{}".format(index)
         try:
-            return open(path, "r+b", buffering=0)
+            pipe = open(path, "r+b", buffering=0)
         except OSError:
             continue
+        mode = wintypes.DWORD(1)  # PIPE_READMODE_BYTE | PIPE_NOWAIT
+        if not set_state(msvcrt.get_osfhandle(pipe.fileno()), ctypes.byref(mode), None, None):
+            error = ctypes.WinError(ctypes.get_last_error())
+            pipe.close()
+            raise error
+        return pipe
     raise OSError("Discord IPC pipe was not found")
 
 
 def _presence_close_locked():
-    global _presence_pipe, _presence_application_id
+    global _presence_pipe, _presence_application_id, _presence_last_activity
     pipe = _presence_pipe
     _presence_pipe = None
     _presence_application_id = ""
+    _presence_last_activity = None
     if pipe is not None:
         try:
             pipe.close()
@@ -181,10 +252,8 @@ def _presence_connect_locked(application_id):
     pipe = _presence_open_pipe()
     try:
         _presence_write_all(pipe, _presence_frame(0, {"v": 1, "client_id": application_id}))
-        _, response = _presence_read_frame(pipe)
-        if response.get("evt") == "ERROR" or "code" in response:
-            raise OSError(response.get("message") or response.get("data", {}).get("message") or "Discord IPC handshake failed")
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        _presence_response(pipe)
+    except (OSError, ValueError):
         try:
             pipe.close()
         except OSError:
@@ -194,7 +263,7 @@ def _presence_connect_locked(application_id):
     _presence_application_id = application_id
 
 
-def _presence_activity(details, state, current, maximum, large_image, large_text):
+def _presence_activity(details, state, current, maximum, large_image, large_text, small_image="", small_text=""):
     global _presence_started_at
     if not _presence_started_at:
         _presence_started_at = int(time.time())
@@ -205,14 +274,18 @@ def _presence_activity(details, state, current, maximum, large_image, large_text
         "timestamps": {"start": _presence_started_at},
         "instance": True,
     }
-    if maximum > 0:
+    if maximum > 0 and current > 0:
         current = max(0, min(int(current), int(maximum)))
         activity["party"] = {"id": "petros", "size": [current, int(maximum)]}
     assets = {}
     if large_image:
         assets["large_image"] = _clip(large_image, 256)
-    if large_text:
+    if large_image and large_text:
         assets["large_text"] = _clip(large_text, 128)
+    if small_image:
+        assets["small_image"] = _clip(small_image, 256)
+        if small_text:
+            assets["small_text"] = _clip(small_text, 128)
     if assets:
         activity["assets"] = assets
     return {key: value for key, value in activity.items() if value is not None}
@@ -227,9 +300,54 @@ def _presence_send_locked(activity):
         "nonce": str(time.time_ns()),
     }
     _presence_write_all(_presence_pipe, _presence_frame(1, payload))
-    _, response = _presence_read_frame(_presence_pipe)
-    if response.get("evt") == "ERROR":
-        raise OSError(response.get("data", {}).get("message") or "Discord rejected Rich Presence update")
+    _presence_response(_presence_pipe, payload["nonce"])
+
+
+def _presence_sync(application_id, activity):
+    global _presence_last_activity
+    _presence_connect_locked(application_id)
+    if activity != _presence_last_activity:
+        _presence_send_locked(activity)
+        _presence_last_activity = activity
+    else:
+        ping = _presence_frame(3, {"nonce": str(time.time_ns())})
+        _presence_write_all(_presence_pipe, ping)
+        _presence_response(_presence_pipe, ping[8:], pong=True)
+
+
+def _presence_worker():
+    failed = False
+    next_update = 0.0
+    while True:
+        with _presence_lock:
+            requested = _presence_requested
+            _presence_wake.clear()
+        if requested is None:
+            try:
+                if _presence_pipe is not None:
+                    _presence_send_locked(None)
+            except (OSError, ValueError) as exc:
+                _log("Rich Presence clear failed: " + str(exc))
+            finally:
+                _presence_close_locked()
+            next_update = 0.0
+            _presence_wake.wait()
+            continue
+        delay = next_update - time.monotonic()
+        if delay > 0:
+            _presence_wake.wait(delay)
+            continue
+        try:
+            _presence_sync(*requested)
+            if failed:
+                _log("Rich Presence connected")
+            failed = False
+        except (OSError, ValueError) as exc:
+            _presence_close_locked()
+            if not failed:
+                _log("Rich Presence unavailable: " + str(exc))
+            failed = True
+        next_update = time.monotonic() + 15.0
 
 
 def _log(message):
@@ -262,6 +380,38 @@ def _load_config():
         cfg[key] = value
     cfg["BOT_TOKEN"] = str(cfg["BOT_TOKEN"]).strip()
     cfg["SERVER_NAME"] = str(cfg["SERVER_NAME"]).strip() or "Antistasi Server"
+    cfg["RICH_PRESENCE_ENABLED"] = cfg["RICH_PRESENCE_ENABLED"] is True
+    application_id = str(cfg["RICH_PRESENCE_APPLICATION_ID"]).strip()
+    cfg["RICH_PRESENCE_APPLICATION_ID"] = application_id
+    if cfg["RICH_PRESENCE_ENABLED"] and not (
+        application_id.isascii() and application_id.isdigit() and 17 <= len(application_id) <= 20
+    ):
+        _log("Player Rich Presence disabled: set RICH_PRESENCE_APPLICATION_ID to a valid Discord Application ID "
+             "in server config.local.py, then restart Petros/Arma")
+        cfg["RICH_PRESENCE_ENABLED"] = False
+    configured_interval = cfg["RICH_PRESENCE_UPDATE_INTERVAL"]
+    try:
+        interval = int(configured_interval)
+        corrected_interval = not 15 <= interval <= 300
+        interval = max(15, min(300, interval))
+    except (TypeError, ValueError, OverflowError):
+        interval, corrected_interval = 15, True
+    cfg["RICH_PRESENCE_UPDATE_INTERVAL"] = interval
+    if corrected_interval and cfg["RICH_PRESENCE_ENABLED"]:
+        _log("RICH_PRESENCE_UPDATE_INTERVAL must be 15-300 seconds; using " + str(interval))
+    for key in ("RICH_PRESENCE_DETAILS", "RICH_PRESENCE_LARGE_IMAGE_KEY", "RICH_PRESENCE_LARGE_IMAGE_TEXT",
+                "RICH_PRESENCE_SMALL_IMAGE_KEY", "RICH_PRESENCE_SMALL_IMAGE_TEXT", "BOT_PRESENCE_TEXT"):
+        cfg[key] = _clip(cfg[key], 256).strip()
+    if cfg["BOT_PRESENCE_STATUS"] not in ("online", "idle", "dnd", "invisible"):
+        _log("Invalid BOT_PRESENCE_STATUS; using online")
+        cfg["BOT_PRESENCE_STATUS"] = "online"
+    # Keep the previously documented numeric values compatible.
+    activity_type = {"playing": 0, "listening": 2, "watching": 3, "competing": 5,
+                     "0": 0, "2": 2, "3": 3, "5": 5}.get(str(cfg["BOT_PRESENCE_ACTIVITY_TYPE"]).strip().lower())
+    if activity_type is None:
+        _log("Invalid BOT_PRESENCE_ACTIVITY_TYPE; using playing")
+        activity_type = 0
+    cfg["BOT_PRESENCE_ACTIVITY_TYPE"] = activity_type
     cfg["RCON_PASSWORD"] = str(cfg["RCON_PASSWORD"]).strip()
     try:
         cfg["RCON_PORT"] = int(cfg["RCON_PORT"])
@@ -1023,7 +1173,6 @@ class _WsClosed(Exception):
     def __init__(self, code=None, reason=""):
         super().__init__(reason)
         self.code = code
-        self.reason = reason
 
 
 def _ws_recv_message(sock, buffer):
@@ -1195,6 +1344,8 @@ def _gateway_worker():
             next_heartbeat = time.monotonic() + random.random() * interval
             awaiting_ack = False
             failures = 0
+            last_presence = None
+            next_presence = 0.0
 
             while True:
                 now = time.monotonic()
@@ -1204,6 +1355,17 @@ def _gateway_worker():
                     _ws_send_json(sock, {"op": 1, "d": _gateway_seq})
                     awaiting_ack = True
                     next_heartbeat = now + interval
+
+                if _gateway_ready and now >= next_presence:
+                    presence = _bot_presence()
+                    if presence != last_presence:
+                        try:
+                            _ws_send_json(sock, {"op": 3, "d": presence})
+                        except OSError:
+                            _log("Bot presence send failed; reconnecting Gateway")
+                            raise
+                        last_presence = presence
+                        next_presence = now + 15.0
 
                 sock.settimeout(max(0.05, min(1.0, next_heartbeat - time.monotonic())))
                 try:
@@ -1222,9 +1384,13 @@ def _gateway_worker():
                         _gateway_session_id = data.get("session_id")
                         _gateway_resume_url = data.get("resume_gateway_url")
                         _gateway_ready = True
+                        last_presence = None
+                        next_presence = 0.0
                         _log("Gateway connected")
                     elif event_type == "RESUMED":
                         _gateway_ready = True
+                        last_presence = None
+                        next_presence = 0.0
                         _log("Gateway resumed")
                     elif event_type == "INTERACTION_CREATE":
                         _handle_interaction(data)
@@ -1365,50 +1531,83 @@ def update_presence(
     max_players=0,
     large_image="",
     large_text="",
+    small_image="",
+    small_text="",
 ):
-    """Set the local Discord user's Rich Presence through Discord desktop IPC."""
+    """Queue local Rich Presence; True means accepted, not acknowledged by Discord."""
     application_id = str(application_id).strip()
-    if not application_id.isdigit():
+    if not application_id.isascii() or not application_id.isdigit() or not 17 <= len(application_id) <= 20:
         return False
     try:
         current_players = int(current_players)
         max_players = int(max_players)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
-    activity = _presence_activity(
-        details,
-        state,
-        current_players,
-        max_players,
-        str(large_image).strip(),
-        str(large_text).strip(),
-    )
+    if current_players < 0 or max_players < 0:
+        return False
+    global _presence_requested, _presence_thread
     with _presence_lock:
-        for attempt in range(2):
-            try:
-                _presence_connect_locked(application_id)
-                _presence_send_locked(activity)
-                return True
-            except (OSError, ValueError, KeyError, json.JSONDecodeError):
-                _presence_close_locked()
-                if attempt:
-                    return False
-    return False
+        activity = _presence_activity(
+            details, state, current_players, max_players,
+            str(large_image).strip(), str(large_text).strip(),
+            str(small_image).strip(), str(small_text).strip(),
+        )
+        _presence_requested = (application_id, activity)
+        _presence_wake.set()
+        if _presence_thread is None:
+            _presence_thread = threading.Thread(target=_presence_worker, name="Petros IPC", daemon=True)
+            _presence_thread.start()
+    return True
 
 
 def clear_presence():
-    """Clear Petros Rich Presence and close the local Discord IPC connection."""
-    global _presence_started_at
+    """Queue a clear without waiting for Discord; the worker owns the pipe."""
+    global _presence_started_at, _presence_requested
     with _presence_lock:
-        try:
-            if _presence_pipe is not None:
-                _presence_send_locked(None)
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            pass
-        finally:
-            _presence_close_locked()
-            _presence_started_at = 0
+        _presence_requested = None
+        _presence_started_at = 0
+        _presence_wake.set()
     return True
+
+
+def set_bot_presence(map_name="", players=0, war=-1):
+    """Receive the existing campaign monitor's display values via Pythia."""
+    global _bot_campaign
+    if not isinstance(map_name, str):
+        return False
+    try:
+        players, war = int(players), int(war)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if players < 0 or war < -1:
+        return False
+    _bot_campaign = (_clip(map_name, 64), players, war) if map_name else None
+    return True
+
+
+def get_presence_config():
+    """Export only public player settings to SQF; never expose bot/RCon credentials."""
+    if not _config["RICH_PRESENCE_ENABLED"]:
+        return []
+    return [
+        _config["RICH_PRESENCE_APPLICATION_ID"], _config["RICH_PRESENCE_UPDATE_INTERVAL"],
+        _config["RICH_PRESENCE_DETAILS"],
+        _config["RICH_PRESENCE_LARGE_IMAGE_KEY"], _config["RICH_PRESENCE_LARGE_IMAGE_TEXT"],
+        _config["RICH_PRESENCE_SMALL_IMAGE_KEY"], _config["RICH_PRESENCE_SMALL_IMAGE_TEXT"],
+    ]
+
+
+def _bot_presence():
+    name = _clip(_config["BOT_PRESENCE_TEXT"] or _config["SERVER_NAME"], 64)
+    campaign = _bot_campaign
+    if campaign and time.monotonic() - _last_sqf_poll < 5.0:
+        map_name, players, war = campaign
+        name += " • {} • {} players".format(map_name, players)
+        if war >= 0:
+            name += " • War {}".format(war)
+    return {"since": None,
+            "activities": [{"name": _clip(name, 128), "type": _config["BOT_PRESENCE_ACTIVITY_TYPE"]}],
+            "status": _config["BOT_PRESENCE_STATUS"], "afk": False}
 
 
 def health():

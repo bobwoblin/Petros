@@ -16,6 +16,11 @@
  */
 if (!isServer || {isNil "py3_fnc_callExtension"}) exitWith {};
 
+private _snapshot = call FUNC(getSnapshot);
+["Petros.set_bot_presence", [
+    _snapshot get "map", _snapshot get "playerCount", _snapshot get "warLevel"
+]] call py3_fnc_callExtension;
+
 private _owners = missionNamespace getVariable [QGVAR(territoryOwners), createHashMap];
 private _lastWar = missionNamespace getVariable [QGVAR(lastWarLevel), -1];
 private _current = markersX - controlsX - ["Synd_HQ"];

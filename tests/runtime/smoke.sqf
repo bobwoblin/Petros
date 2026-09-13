@@ -24,7 +24,7 @@ private _check = {
     "petros_fnc_updateRichPresence"
 ];
 
-["rich presence config exists", isClass (configFile >> "CfgPetrosRichPresence")] call _check;
+["public rich presence config received", !(isNil "petros_richPresenceConfig") && {petros_richPresenceConfig isEqualType []}] call _check;
 
 private _preStart = configFile >> "CfgFunctions" >> "petros" >> "Bootstrap" >> "preStart";
 ["preStart remains engine-registered", getNumber (_preStart >> "preStart") == 1] call _check;

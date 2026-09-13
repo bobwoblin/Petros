@@ -21,6 +21,11 @@ if !(isNil QGVAR(richPresencePFH)) then {
     GVAR(richPresencePFH) = nil;
 };
 
+if !(isNil QGVAR(richPresenceUnloadEH)) then {
+    (findDisplay 46) displayRemoveEventHandler ["Unload", GVAR(richPresenceUnloadEH)];
+    GVAR(richPresenceUnloadEH) = nil;
+};
+
 if !(isNil "py3_fnc_callExtension") then {
     ["Petros.clear_presence"] call py3_fnc_callExtension;
 };

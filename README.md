@@ -57,40 +57,46 @@ ADMIN_USER_IDS = ["..."]
 ADMIN_ROLE_IDS = []
 ```
 
-`config.local.py` is ignored and should stay local. It is only used by the server-side Discord bridge.
+`config.local.py` may contain secrets, is ignored by Git, and must not be committed. It is only used by the server-side Discord bridge.
 
 Discord embed styling is intentionally separate from credentials. Edit `python_code/presentation.py` to change shared author/footer text, event titles/descriptions, and colors without touching bot logic.
 
 Petros connects to Discord with Gateway intents `0` and to BattlEye RCon on `127.0.0.1`. If RCon is down, mission load/restart/selection commands are unavailable. Antistasi information and save commands can still work once the mission bridge is running.
 
-### Player Discord Rich Presence
+### Discord Rich Presence
 
-Rich Presence is built into Petros. Players do not need a separate Discord Rich Presence Arma mod.
+Configure the **server's** `python_code/config.local.py` (copy the existing `config.example.py`). No Python/SQF/HPP source edits or operator-specific builds are needed.
 
-Edit `addons/main/CfgRichPresence.hpp` before building:
+1. Create/use your Discord Developer Portal application and copy its Application ID below. This player application can differ from the bot's `APPLICATION_ID`.
+2. Optionally upload Rich Presence art to that application and enter its asset keys. Empty keys omit the images and their text.
+3. Start/restart the Petros server. Joining players automatically receive the public settings; they join with CBA, Pythia, and Petros installed and Discord desktop activity sharing enabled.
 
-```cpp
-class CfgPetrosRichPresence {
-    applicationID = "YOUR_DISCORD_APPLICATION_ID";
-    enabled = 1;
-    updateInterval = 15;
-    details = "Antistasi Ultimate";
-    largeImageKey = "";
-    largeImageText = "Bobby's Junta";
-};
+```python
+RICH_PRESENCE_ENABLED = True
+RICH_PRESENCE_APPLICATION_ID = "YOUR_DISCORD_APPLICATION_ID"
+RICH_PRESENCE_UPDATE_INTERVAL = 15  # Seconds; minimum 15, maximum 300.
+RICH_PRESENCE_DETAILS = "Antistasi Ultimate"
+RICH_PRESENCE_LARGE_IMAGE_KEY = ""
+RICH_PRESENCE_LARGE_IMAGE_TEXT = ""
+RICH_PRESENCE_SMALL_IMAGE_KEY = ""
+RICH_PRESENCE_SMALL_IMAGE_TEXT = ""
+
+BOT_PRESENCE_STATUS = "online"  # online, idle, dnd, invisible
+BOT_PRESENCE_ACTIVITY_TYPE = "playing"  # playing, listening, watching, competing
+BOT_PRESENCE_TEXT = ""  # Empty uses the existing SERVER_NAME.
 ```
 
-Create or use a Discord application named **Bobby's Junta** and put its public Application ID in `applicationID`. Discord uses that application name for the `Playing Bobby's Junta` line.
+Discord supplies the player application's display name from the Developer Portal; there is no separate Petros application-name override. `RICH_PRESENCE_DETAILS` is static descriptive text; current server name, map, human player count/mission capacity, group side, and available war level still come from live Arma/Antistasi state. Bot activity retains live map/count/war information after its configured text.
 
-When a player joins with Petros and Pythia loaded as normal client mods, Petros connects to that player's local Discord desktop IPC and publishes:
+The existing server config loader validates these values once on startup. Invalid intervals use 15 seconds; out-of-range intervals are clamped to 15–300, with one warning when enabled. Invalid bot activity types warn once and use `playing`; legacy numeric types 0/2/3/5 remain accepted. Missing/malformed player IDs log one useful server message and disable player presence for that session. Explicitly disabled presence is silent; omitted settings default to disabled. Correct the config and restart the server to apply changes. Existing bot credentials remain required for normal Petros startup.
 
-- `Playing Bobby's Junta`
-- `Antistasi Ultimate`
-- map name and current/max player count
-- elapsed session time
-- optional large image asset configured in the Discord application
+Server postInit exports only an explicit public allowlist through Pythia and broadcasts `petros_richPresenceConfig` to current and joining players. Clients never load or receive `config.local.py`, bot credentials, or RCon credentials. There is no compile-time Arma limitation: the old `CfgRichPresence.hpp` was removed because these are runtime values. Operators configure each value in one place.
 
-The presence refreshes every 15 seconds by default and clears when the Arma gameplay display unloads, including mission exit or disconnect. Failure to reach Discord is non-fatal and does not affect gameplay.
+Client postInit waits for public settings, the player, gameplay display, and Pythia. The CBA handler samples state at the configured interval. One Python worker owns local Windows Discord IPC; Pythia calls only queue the latest activity. Changed activity is sent at most once per 15 seconds, retaining the session timer. Unchanged activity uses IPC PING instead of another SET_ACTIVITY. Pipe reads/writes have two-second deadlines. Connection failures close the pipe and retry after 15 seconds, replaying the latest activity after READY. Failures are logged once per outage, followed by a recovery message.
+
+Gameplay display unload removes the handler and queues a clear, closes IPC, and resets the session timer. Arma process exit also releases the pipe. `update_presence` returning true means queued, not confirmed by Discord; client Python logs report actual RPC failures.
+
+Petros's bot uses its existing Gateway connection and restores configured activity/status after READY or RESUMED. The existing 12-second campaign monitor supplies dynamic values. Changed activity is sent at most once per 15 seconds; unchanged activity is suppressed. New mission postInit resets campaign values; when mission command polling stops for five seconds the activity falls back to its configured text/server name. Send failures log and use the existing reconnect path.
 
 ## Antistasi integration
 

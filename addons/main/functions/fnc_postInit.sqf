@@ -26,9 +26,15 @@ if (isNil "py3_fnc_callExtension") exitWith {
 };
 
 private _health = ["Petros.start"] call py3_fnc_callExtension;
+// Only the explicitly public player settings leave the server's config.local.py.
+GVAR(richPresenceConfig) = ["Petros.get_presence_config"] call py3_fnc_callExtension;
+publicVariable QGVAR(richPresenceConfig);
+
 if !(_health isEqualType [] && {count _health > 0} && {_health # 0}) exitWith {
     ERROR_1("Python postInit failed: %1",_health);
 };
+
+["Petros.set_bot_presence"] call py3_fnc_callExtension;
 
 private _missions = [];
 {

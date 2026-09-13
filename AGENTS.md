@@ -31,7 +31,7 @@
 - Keep admin authorization and command-channel restrictions in place.
 - Don't add arbitrary RCon, SQF, shell, kick/ban, or generic remote-execution commands.
 - Keep `python_code/config.local.py` local and untracked. Never commit tokens or RCon credentials.
-- Keep server bot configuration and client Rich Presence configuration separate: `config.local.py` is server-only; public Rich Presence settings live in `CfgRichPresence.hpp`.
+- Keep `config.local.py` server-only. Player Rich Presence uses its independent `RICH_PRESENCE_*` settings; publish only their explicit public allowlist to clients, never bot or RCon credentials.
 - Keep player Rich Presence inside Petros through Pythia and the local Discord IPC protocol; do not add another Rich Presence addon or client DLL without a concrete requirement.
 - Keep direct Antistasi save-selector/global access isolated. Re-check call sites marked with `ponytail:` when upstream behavior changes.
 - The scheduled `A3A_fnc_saveLoop` call stays scheduled because the upstream function requires it.

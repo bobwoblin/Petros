@@ -4,4 +4,3 @@
 
 #include "CfgFunctions.hpp"
 #include "CfgEventHandlers.hpp"
-#include "CfgRichPresence.hpp"
