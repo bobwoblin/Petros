@@ -18,6 +18,7 @@
  */
 params ["_interactionId", "_command", ["_options", []]];
 if (!isServer || {isNil "py3_fnc_callExtension"}) exitWith {};
+if ([_interactionId, _command, _options] call FUNC(handleIntelCommand)) exitWith {};
 
 private _snapshot = call FUNC(getSnapshot);
 private _ready = _snapshot get "ready";
@@ -154,7 +155,6 @@ switch (_command) do {
             _description = "Antistasi Ultimate is still starting.";
         };
     };
-    // ponytail: Antistasi save-selector functions are unversioned compatibility points, re-audit collectSaveData/startGame when upstream save setup changes.
     case "saves": {
         _title = "Campaign Saves";
         if (isNil "A3A_backgroundInitDone" || {isNil "A3A_fnc_collectSaveData"}) then {

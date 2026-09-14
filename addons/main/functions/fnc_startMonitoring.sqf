@@ -17,6 +17,10 @@
 if (!isServer || {missionNamespace getVariable [QGVAR(monitoringStarted), false]}) exitWith {};
 missionNamespace setVariable [QGVAR(monitoringStarted), true];
 
+if !(isNil "A3A_Events_fnc_addEventListener") then {
+    ["markerChange", "petros_main", { _this call FUNC(handleTerritoryEvent) }] call A3A_Events_fnc_addEventListener;
+};
+
 private _lastWar = missionNamespace getVariable ["tierWar", -1];
 
 addMissionEventHandler ["PlayerConnected", {

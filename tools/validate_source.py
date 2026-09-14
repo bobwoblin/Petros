@@ -287,6 +287,24 @@ check(
 handle = read(ADDON / "functions/fnc_handleCommand.sqf")
 check("[] spawn A3A_fnc_saveLoop" in handle, "Antistasi saveLoop scheduled-context compatibility call changed")
 check("ponytail:" in handle, "private Antistasi scheduled-context dependency isn't marked as intentional debt")
+garrisons = read(ADDON / "functions/fnc_getGarrisons.sqf")
+check("A3A_fnc_getGarrison" in garrisons and "A3A_fnc_countGarrison" in garrisons,
+      "garrison adapter must use Antistasi's centralized read helpers")
+garage = read(ADDON / "functions/fnc_getGarage.sqf")
+check("HR_GRG_fnc_getSaveData" in garage,
+      "garage adapter must use Antistasi's public server save-data API")
+towns = read(ADDON / "functions/fnc_getTowns.sqf")
+check("A3A_townData" in towns and "ponytail:" in towns,
+      "town adapter's upstream record dependency must remain isolated and marked")
+monitor = read(ADDON / "functions/fnc_startMonitoring.sqf")
+check('"markerChange"' in monitor and "A3A_Events_fnc_addEventListener" in monitor,
+      "territory monitoring must subscribe to Antistasi's marker event")
+poll = read(ADDON / "functions/fnc_pollCommands.sqf")
+check("Petros.observe_save" in poll,
+      "command polling must forward authoritative save-state edges")
+python_bridge = read(ROOT / "python_code/__init__.py")
+check('_rcon_command("#restart")' in python_bridge and '"kind": "safe_restart"' in python_bridge,
+      "safe restart must retain its fixed RCon command path")
 check((ROOT / "python_code/config.example.py").is_file(), "missing public Python configuration example")
 check((ROOT / "python_code/selftest.py").is_file(), "missing Python bridge self-test")
 check((ROOT / "tests/runtime/README.md").is_file(), "missing runtime verification matrix")

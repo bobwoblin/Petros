@@ -28,6 +28,11 @@ private _war = missionNamespace getVariable ["tierWar", -1];
 private _serverObject = missionNamespace getVariable ["server", objNull];
 private _resources = if (isNull _serverObject) then {-1} else {_serverObject getVariable ["resourcesFIA", -1]};
 private _hr = if (isNull _serverObject) then {-1} else {_serverObject getVariable ["hr", -1]};
+private _saving = missionNamespace getVariable ["savingServer", false];
+private _nextAutosave = -1;
+if (!isNil "autoSave" && {autoSave} && {!isNil "autoSaveTime"}) then {
+    _nextAutosave = ceil ((autoSaveTime - time) max 0);
+};
 private _territory = [];
 private _locations = [];
 private _strategicTotal = 0;
@@ -78,6 +83,10 @@ createHashMapFromArray [
     ["warLevel", _war],
     ["resources", _resources],
     ["hr", _hr],
+    ["supportPoints", missionNamespace getVariable ["supportPoints", -1]],
+    ["maxSupportPoints", missionNamespace getVariable ["maxSupportPoints", -1]],
+    ["saving", _saving],
+    ["nextAutosave", _nextAutosave],
     ["strategicOwned", _strategicOwned],
     ["strategicTotal", _strategicTotal],
     ["territory", _territory],

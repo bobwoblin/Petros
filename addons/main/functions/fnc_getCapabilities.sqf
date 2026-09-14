@@ -20,6 +20,12 @@
     ["territory", !isNil "markersX" && {!isNil "controlsX"} && {!isNil "sidesX"}],
     ["resources", !isNil "server" && {!isNull server}],
     ["commander", !isNil "theBoss"],
-    ["save", !isNil "A3A_saveData"],
-    ["events", !isNil "A3A_fnc_addEventHandler"]
+    ["save", !isNil "A3A_fnc_saveLoop" && {!isNil "savingServer"}],
+    ["garrisons", !isNil "A3A_fnc_getGarrison" && {!isNil "A3A_fnc_countGarrison"}],
+    ["garage", !isNil "HR_GRG_fnc_getSaveData"],
+    ["towns", !isNil "A3A_townData" && {!isNil "citiesX"}],
+    ["support", !isNil "supportPoints" && {!isNil "maxSupportPoints"}],
+    ["assets", !isNil "HR_GRG_fnc_getSaveData"],
+    ["events", !isNil "A3A_fnc_addEventHandler"],
+    ["territoryEvents", !isNil "A3A_Events_fnc_addEventListener"]
 ]

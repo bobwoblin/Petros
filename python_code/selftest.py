@@ -138,6 +138,7 @@ class PetrosSelfTest(unittest.TestCase):
         PETROS._presence_diagnostics.clear()
         PETROS._bot_campaign = None
         PETROS._campaign = PETROS.CampaignTracker()
+        PETROS._restart = None
         self.cfg = dict(PETROS._DEFAULTS)
         self.cfg.update({
             "GUILD_ID": "100",
@@ -564,6 +565,13 @@ class PetrosSelfTest(unittest.TestCase):
             )[1],
             "unauthorized_management",
         )
+        for command in ("restart", "server"):
+            self.assertEqual(
+                PETROS._validate_interaction(self.interaction(command=command), self.cfg)[1],
+                "unauthorized_management",
+            )
+            self.assertTrue(PETROS._validate_interaction(
+                self.interaction(command=command, user="1"), self.cfg)[0])
         self.assertEqual(PETROS._validate_interaction(self.interaction(guild_id="999"), self.cfg)[1], "wrong_guild")
         self.assertEqual(PETROS._validate_interaction(self.interaction(channel_id="999"), self.cfg)[1], "wrong_channel")
         self.assertEqual(PETROS._validate_interaction(self.interaction(token=""), self.cfg)[1], "missing_token")
@@ -611,6 +619,21 @@ class PetrosSelfTest(unittest.TestCase):
         )
         self.assertTrue(PETROS._validate_options("loadsave", [{"name": "id", "type": 3, "value": "12345"}])[0])
         self.assertFalse(PETROS._validate_options("loadsave", [{"name": "id", "type": 3, "value": "bad id"}])[0])
+        self.assertEqual(PETROS._validate_options("garrisons", [])[2], [""])
+        self.assertTrue(PETROS._validate_options(
+            "garrisons", [{"name": "location", "type": 3, "value": "airport_1"}])[0])
+        self.assertFalse(PETROS._validate_options(
+            "garrisons", [{"name": "location", "type": 3, "value": "x;call"}])[0])
+        self.assertEqual(PETROS._validate_options("garage", [])[2], [""])
+        self.assertTrue(PETROS._validate_options(
+            "garage", [{"name": "category", "type": 3, "value": "armor"}])[0])
+        self.assertFalse(PETROS._validate_options(
+            "towns", [{"name": "sort", "type": 3, "value": "secret"}])[0])
+        self.assertEqual(PETROS._validate_options("restart", [])[2], [60])
+        self.assertTrue(PETROS._validate_options(
+            "restart", [{"name": "countdown", "type": 4, "value": 300}])[0])
+        self.assertFalse(PETROS._validate_options(
+            "restart", [{"name": "countdown", "type": 4, "value": 31}])[0])
 
     def test_battleye_rcon_packets_and_fragmentation(self):
         login = PETROS._rcon_packet(b"\xff\x00\x01")
@@ -829,6 +852,14 @@ class PetrosSelfTest(unittest.TestCase):
             PETROS.LOCATION_VALUES,
         )
         self.assertTrue(all("integration_types" not in command and "contexts" not in command for command in commands))
+        garrisons = next(command for command in commands if command["name"] == "garrisons")
+        self.assertTrue(garrisons["options"][0]["autocomplete"])
+        garage = next(command for command in commands if command["name"] == "garage")
+        self.assertEqual({choice["value"] for choice in garage["options"][0]["choices"]},
+                         {value for _, value in PETROS.GARAGE_CHOICES})
+        restart = next(command for command in commands if command["name"] == "restart")
+        self.assertEqual({choice["value"] for choice in restart["options"][0]["choices"]},
+                         set(PETROS.RESTART_COUNTDOWNS))
 
     def test_campaign_baseline_transitions_and_deduplication(self):
         tracker = PETROS.CampaignTracker(idle_grace=10)
@@ -854,6 +885,59 @@ class PetrosSelfTest(unittest.TestCase):
         self.assertEqual(tracker.observe(changed, 72), [])
         self.assertEqual(tracker.session["completed"], 1)
         self.assertEqual(tracker.session["gained"], ["Kujari Airport"])
+
+    def test_territory_event_then_snapshot_deduplicates(self):
+        tracker = PETROS.CampaignTracker()
+        base = {
+            "map": "Kujari", "campaignId": "7", "playerCount": 1, "uptime": 100,
+            "warLevel": 2, "hr": 10, "resources": 1000, "commander": "Austin", "fps": 40,
+            "capabilities": [["tasks", True], ["territory", True], ["resources", True]],
+            "missions": [],
+            "locations": [["airport_1", "Kujari Airport", "Airport", "Occupants", "123456"]],
+        }
+        tracker.observe(base, 0)
+        row = ["airport_1", "Kujari Airport", "Airport", "Resistance", "123456"]
+        self.assertEqual([event["kind"] for event in tracker.observe_territory(row, 5)], ["territory_gain"])
+        self.assertEqual(tracker.observe_territory(row, 6), [])
+        self.assertEqual(tracker.observe(dict(base, locations=[row]), 12), [])
+
+    def test_save_observation_and_status(self):
+        tracker = PETROS.CampaignTracker()
+        tracker.snapshot = {"saving": False, "nextAutosave": 120,
+                            "capabilities": [["save", True]]}
+        tracker.observe_save(False, 0)
+        tracker.observe_save(True, 10)
+        tracker.observe_save(False, 20)
+        status = tracker.save_status_text(30)
+        self.assertIn("Last start: 0m ago", status)
+        self.assertIn("Last completion: 0m ago", status)
+        self.assertIn("Next autosave: 2m", status)
+
+    def test_safe_restart_requires_completed_save(self):
+        with patch.dict(PETROS._config, {"RCON_PASSWORD": "secret"}), \
+                patch.object(PETROS.time, "monotonic", return_value=100), \
+                patch.object(PETROS, "_enqueue_out", return_value=True) as enqueue:
+            self.assertTrue(PETROS.schedule_restart(0))
+            self.assertEqual(PETROS._restart_tick(100), [["", "__restart_save", []]])
+            PETROS.observe_save(False)
+            enqueue.assert_not_called()
+            PETROS.observe_save(True)
+            enqueue.assert_not_called()
+            PETROS.observe_save(False)
+        enqueue.assert_called_once_with({"kind": "safe_restart"}, high=True)
+
+    def test_safe_restart_times_out_without_rcon(self):
+        with patch.dict(PETROS._config, {"RCON_PASSWORD": ""}):
+            self.assertFalse(PETROS.schedule_restart(60))
+        with patch.dict(PETROS._config, {"RCON_PASSWORD": "secret"}), \
+                patch.object(PETROS.time, "monotonic", return_value=100), \
+                patch.object(PETROS, "send_event") as event:
+            self.assertTrue(PETROS.schedule_restart(0))
+            PETROS._restart_tick(100)
+            commands = PETROS._restart_tick(146)
+        self.assertEqual(commands, [["", "__restart_failed", []]])
+        self.assertIsNone(PETROS._restart)
+        self.assertIn("timed out", event.call_args.args[1])
 
     def test_campaign_session_recent_bound_and_health_hysteresis(self):
         tracker = PETROS.CampaignTracker(idle_grace=10, recent_limit=3)
@@ -907,6 +991,23 @@ class PetrosSelfTest(unittest.TestCase):
             self.assertTrue(PETROS._handle_autocomplete(interaction))
         self.assertEqual(calls[0][2]["data"]["choices"], [
             {"name": "Antistasi_Kujari.Kujari", "value": "Antistasi_Kujari.Kujari"}
+        ])
+
+    def test_garrison_autocomplete_uses_owned_snapshot_locations(self):
+        PETROS._campaign.locations = {
+            "airport_1": {"name": "Kujari Airport", "type": "Airport", "owner": "Resistance"},
+            "base_1": {"name": "Enemy Base", "type": "Military Base", "owner": "Occupants"},
+        }
+        interaction = self.interaction(command="garrisons")
+        interaction["type"] = 4
+        interaction["data"]["options"] = [
+            {"name": "location", "type": 3, "value": "kuj", "focused": True}]
+        calls = []
+        with patch.object(PETROS, "_config", self.cfg), \
+                patch.object(PETROS, "_callback", side_effect=lambda *args: calls.append(args)):
+            self.assertTrue(PETROS._handle_autocomplete(interaction))
+        self.assertEqual(calls[0][2]["data"]["choices"], [
+            {"name": "Kujari Airport (Airport)", "value": "airport_1"}
         ])
 
     def test_no_extra_runtime_dependencies(self):

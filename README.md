@@ -20,22 +20,27 @@ Public commands:
 
 ```text
 /help /ping /status /players /campaign /territory
-/locations /war /resources /missions /activity
+/locations /war /resources /missions /activity /garrisons
+/garage /towns /economy /assets /savestatus
 ```
 
 Admin server commands:
 
 ```text
-/servermissions /loadmission /restartmission /missionselect
+/servermissions /loadmission /restartmission /missionselect /server
 ```
 
 Admin Antistasi commands:
 
 ```text
-/saves /loadsave /save /announce
+/saves /loadsave /save /announce /restart
 ```
 
-There are no arbitrary RCon, SQF, shell, kick/ban, or generic remote-execution commands.
+`/garrisons`, `/garage`, `/towns`, `/economy`, and `/assets` are read-only. `/garrisons` accepts an autocompleted player-owned location for detail; `/garage` accepts a fixed category; and `/towns` supports support, population, and ownership ordering. Garage checkout state is omitted because Antistasi's public snapshot deliberately removes it. Strategic asset groups use Arma vehicle inheritance and are an inventory aid, not a gameplay-role guarantee.
+
+`/restart` is the safe save-before-restart workflow. Its optional fixed countdown emits in-game notices, starts Antistasi's normal save routine, and waits for Petros to observe Antistasi enter and leave `savingServer` before sending the fixed BattlEye `#restart`. A missing transition or timeout cancels the restart. The existing `/restartmission` remains the immediate compatibility command.
+
+There are no arbitrary RCon, SQF, shell, kick/ban, generic remote-execution, garage mutation, garrison mutation, or town-support mutation commands.
 
 ## Configuration
 
@@ -102,17 +107,19 @@ Petros's bot uses its existing Gateway connection and restores configured activi
 
 `/saves` reads the save catalog for the current map. `/loadsave` selects a save through Antistasi's normal start-game path and refuses campaign switching after the campaign has started.
 
-The SQF compatibility adapter capability-checks Antistasi at runtime and produces one normalized snapshot containing campaign identity, tasks, territory, HR/resources, War Level, commander, players, and integration capabilities. Missing optional state degrades that feature and produces one health transition instead of stopping the bridge.
+The SQF compatibility adapter capability-checks Antistasi at runtime and produces one normalized snapshot containing campaign identity, tasks, territory, HR/resources, support points, save state/autosave countdown, War Level, commander, players, and integration capabilities. Small concrete adapters normalize player-owned garrisons, town support, and garage/assets. Missing optional state degrades that feature instead of stopping the bridge.
+
+Garrisons use `A3A_fnc_getGarrison` and `A3A_fnc_countGarrison`; capacity is included only when `A3A_fnc_getGarrisonLimit` exists. Garage inventory uses the public server-side `HR_GRG_fnc_getSaveData`. Towns read the same `A3A_townData` population/government/rebel support values exposed by Antistasi's player map information. `/economy` reports current authoritative values and territory totals; it does not reproduce `fn_resourcecheck.sqf` or predict income.
 
 Petros reads Antistasi Ultimate's server-owned `A3A_tasksData` records through one marked compatibility function. The upstream record is `[task ID, type, state, creation time]`; Petros derives durations and reports mission starts, success, failure, or deletion without integrating with every mission script. `/missions` shows the richer live records. Existing tasks and territory form a silent baseline on startup or campaign change, so a bridge restart does not manufacture events.
 
-Petros subscribes to Antistasi Ultimate's supported `A3A_fnc_addEventHandler` wrapper for `A3A_event_serverInitDone`, with the existing readiness check retained for late loading and reconciliation. The centralized task updater and territory ownership changes do not publish corresponding authoritative events, so Petros retains the existing 12-second snapshot/diff monitor for those transitions rather than patching Antistasi or increasing polling frequency.
+Petros subscribes to Antistasi Ultimate's supported `A3A_fnc_addEventHandler` wrapper for `A3A_event_serverInitDone`, with the existing readiness check retained for late loading. Once initialized, it subscribes to the current `markerChange` event through the public `A3A_Events_fnc_addEventListener` interface. That event enters the same normalized territory tracker used by notifications, activity, and session reports. The existing 12-second snapshot/diff monitor remains the missed-event and restart-recovery fallback; updating the tracker from the event prevents the following snapshot from emitting a duplicate.
 
 The same normalized territory transition feeds notifications, the current play-session summary, and `/activity`. Recent activity is memory-only and bounded to 75 strategic events. It excludes kill, AI, garrison, and resource-tick noise.
 
 A play session starts when the server changes from no human players to at least one. It ends after ten player-free minutes, allowing reconnects without splitting the session. The after-action report includes duration, peak players, territory gains/losses, War Level, HR/resources deltas, mission outcomes, and changed strategic locations. Sessions, task deduplication, and recent activity intentionally reset when Petros restarts and are not persisted.
 
-Health monitoring reports missing task/territory/resource capabilities once per degraded transition and uses three consecutive sub-10 FPS snapshots plus a 15 FPS recovery threshold. Discord Gateway and REST health remain visible in `/ping`; RCon availability is reported by the fixed commands that actually use it. Petros does not claim it can notify Discord while the Discord connection or SQF/Pythia bridge itself is unavailable.
+Health monitoring reports missing task/territory/resource capabilities once per degraded transition and uses three consecutive sub-10 FPS snapshots plus a 15 FPS recovery threshold. `/savestatus` reports current state, memory-only observed start/completion times, and Antistasi's next-autosave countdown when exposed. `/server` combines campaign, save, Discord, mission bridge, RCon configuration, version, and capability state. RCon is described as configured until a fixed command actually tests reachability. Petros does not claim it can notify Discord while the Discord connection or SQF/Pythia bridge itself is unavailable.
 
 `/loadmission` has admin-scoped autocomplete sourced from the live Antistasi `CfgMissions` catalog. Autocomplete is convenience only: the existing authorization, character validation, and fixed RCon command path remain authoritative.
 
@@ -141,7 +148,7 @@ hemtt check --pedantic
 hemtt build
 ```
 
-The Python self-test covers command validation/authorization, Discord transport, Discord Rich Presence IPC framing, BattlEye RCon framing and fragmentation, mission discovery/autocomplete, campaign baselining, task and territory transitions, session summaries, health hysteresis, recent-activity bounds, command registration, limits, typed options, and the standard-library-only runtime requirement.
+The Python self-test covers command validation/authorization, Discord transport, Discord Rich Presence IPC framing, BattlEye RCon framing and fragmentation, mission/garrison autocomplete, campaign baselining, task and territory event/reconciliation transitions, save observation, safe-restart success/timeouts, session summaries, health hysteresis, recent-activity bounds, command registration, limits, typed options, and the standard-library-only runtime requirement.
 
 See `tests/runtime/README.md` for runtime checks.
 

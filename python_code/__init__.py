@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-from .campaign import CampaignTracker
+from .campaign import CampaignTracker, duration
 
 API_BASE = "https://discord.com/api/v10"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -29,10 +29,11 @@ USER_AGENT = "Petros/1.0 (Antistasi Ultimate Discord bridge)"
 
 INFO_COMMANDS = {
     "help", "ping", "status", "players", "campaign", "territory",
-    "locations", "war", "resources", "missions", "activity",
+    "locations", "war", "resources", "missions", "activity", "garrisons",
+    "garage", "towns", "economy", "assets", "savestatus",
 }
 SERVER_COMMANDS = {"servermissions", "loadmission", "restartmission", "missionselect"}
-MANAGEMENT_COMMANDS = {"save", "announce", "saves", "loadsave"} | SERVER_COMMANDS
+MANAGEMENT_COMMANDS = {"save", "announce", "saves", "loadsave", "restart", "server"} | SERVER_COMMANDS
 ALL_COMMANDS = INFO_COMMANDS | MANAGEMENT_COMMANDS
 LOCATION_CHOICES = (
     ("All", "all"),
@@ -45,6 +46,18 @@ LOCATION_CHOICES = (
     ("Seaports", "seaports"),
 )
 LOCATION_VALUES = frozenset(value for _, value in LOCATION_CHOICES)
+GARAGE_CHOICES = (
+    ("Undercover Vehicles", "undercover"), ("Vehicles", "vehicles"),
+    ("Armor", "armor"), ("Helicopters", "helicopters"),
+    ("Aircraft", "aircraft"), ("Boats", "boats"),
+    ("Service Vehicles", "sources"), ("Statics", "statics"),
+)
+TOWN_CHOICES = (
+    ("Lowest Rebel Support", "lowest"), ("Highest Rebel Support", "highest"),
+    ("Largest Population", "population"), ("Resistance Owned", "owned"),
+    ("Not Resistance Owned", "unowned"),
+)
+RESTART_COUNTDOWNS = (0, 30, 60, 300)
 EVENT_SETTINGS = {
     "server_online": "NOTIFY_SERVER_ONLINE",
     "player_join": "NOTIFY_PLAYER_JOINS",
@@ -148,6 +161,8 @@ _presence_last_activity = None
 _presence_diagnostics = {}
 _bot_campaign = None
 _campaign = CampaignTracker()
+_restart_lock = threading.Lock()
+_restart = None
 
 
 def _presence_log(stage, message):
@@ -649,6 +664,12 @@ def _commands_payload():
         "resources": "Show current resistance resources.",
         "missions": "Show currently active Antistasi mission types.",
         "activity": "Show recent meaningful Antistasi campaign activity.",
+        "garrisons": "Show player-owned strategic garrison strength.",
+        "garage": "Show read-only Antistasi garage inventory.",
+        "towns": "Show town population and political support.",
+        "economy": "Show a consolidated campaign economy view.",
+        "assets": "Show read-only strategic asset counts.",
+        "savestatus": "Show observed Antistasi save lifecycle state.",
         "servermissions": "List Arma multiplayer missions available to the server. Admin only.",
         "loadmission": "Load an Arma multiplayer mission by template name. Admin only.",
         "restartmission": "Restart the currently loaded Arma mission. Admin only.",
@@ -657,6 +678,8 @@ def _commands_payload():
         "loadsave": "Load an Antistasi campaign save by ID during setup. Admin only.",
         "save": "Request an Antistasi campaign save. Admin only.",
         "announce": "Broadcast a plain-text in-game announcement. Admin only.",
+        "restart": "Save and safely restart the current mission. Admin only.",
+        "server": "Show consolidated server operations state. Admin only.",
     }
     commands = []
     for name, description in descriptions.items():
@@ -668,6 +691,33 @@ def _commands_payload():
                 "type": 3,
                 "required": False,
                 "choices": location_choices,
+            }]
+        elif name == "garrisons":
+            command["options"] = [{
+                "name": "location",
+                "description": "Player-owned strategic location",
+                "type": 3,
+                "required": False,
+                "autocomplete": True,
+            }]
+        elif name == "garage":
+            command["options"] = [{
+                "name": "category", "description": "Garage category", "type": 3,
+                "required": False,
+                "choices": [{"name": label, "value": value} for label, value in GARAGE_CHOICES],
+            }]
+        elif name == "towns":
+            command["options"] = [{
+                "name": "sort", "description": "Town order or ownership filter", "type": 3,
+                "required": False,
+                "choices": [{"name": label, "value": value} for label, value in TOWN_CHOICES],
+            }]
+        elif name == "restart":
+            command["options"] = [{
+                "name": "countdown", "description": "Seconds before save and restart", "type": 4,
+                "required": False,
+                "choices": [{"name": "{} seconds".format(value), "value": value}
+                            for value in RESTART_COUNTDOWNS],
             }]
         elif name == "announce":
             command["options"] = [{
@@ -733,6 +783,32 @@ def _validate_options(command, raw_options):
         value = value.lower()
         if value not in LOCATION_VALUES:
             return False, "Unsupported location type.", []
+        return True, "", [value]
+    if command in ("garrisons", "garage", "towns"):
+        defaults = {"garrisons": "", "garage": "", "towns": "lowest"}
+        if not options:
+            return True, "", [defaults[command]]
+        names = {"garrisons": "location", "garage": "category", "towns": "sort"}
+        value, error = _string_option(options, names[command], "Invalid option.", "Invalid option type.")
+        if error:
+            return False, error, []
+        if command == "garrisons":
+            if len(value) > 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for char in value):
+                return False, "Location contains unsupported characters.", []
+        else:
+            valid = dict(GARAGE_CHOICES if command == "garage" else TOWN_CHOICES).values()
+            if value not in valid:
+                return False, "Unsupported {} option.".format(command), []
+        return True, "", [value]
+    if command == "restart":
+        if not options:
+            return True, "", [60]
+        if len(options) != 1:
+            return False, "Invalid restart countdown.", []
+        option = options[0]
+        value = option.get("value")
+        if option.get("name") != "countdown" or option.get("type") != 4 or isinstance(value, bool) or value not in RESTART_COUNTDOWNS:
+            return False, "Unsupported restart countdown.", []
         return True, "", [value]
     if command == "announce":
         value, error = _string_option(
@@ -1002,6 +1078,34 @@ def _sqf_bridge_ready():
     return bool(_last_sqf_poll and time.monotonic() - _last_sqf_poll < 3.0)
 
 
+def _server_status_text():
+    snapshot = _campaign.snapshot or {}
+    capabilities = CampaignTracker._capabilities(snapshot)
+    unavailable = sorted(name for name, available in capabilities.items() if not available)
+    campaign = snapshot.get("campaignName") or "Unnamed / not observed"
+    save_state = "not observed" if _campaign.saving is None else ("saving" if _campaign.saving else "idle")
+    bridge = _sqf_bridge_ready()
+    return (
+        "**Server Operations**\n"
+        "Campaign: {} · {}\nCommander: {} · War {}\n"
+        "Players: {} · FPS {} · Uptime {}\nSave: {}\n"
+        "Discord: Gateway {} · REST {} · Commands {}\n"
+        "Mission bridge: {} · RCon: {}\nAntistasi: {}\n"
+        "Capabilities: {}\nDegraded: {}"
+    ).format(
+        campaign, snapshot.get("map", "not observed"), snapshot.get("commander", "None"),
+        snapshot.get("warLevel", "?"), snapshot.get("playerCount", 0), snapshot.get("fps", "?"),
+        duration(snapshot.get("uptime", 0)), save_state,
+        "ready" if _gateway_ready else "offline", "ready" if _rest_ready else "offline",
+        "registered" if _commands_ready else "pending",
+        "ready" if bridge else "inactive; campaign values are last observed",
+        "configured; checked on use" if _config.get("RCON_PASSWORD") else "not configured",
+        snapshot.get("version", "not observed"),
+        ", ".join(sorted(name for name, available in capabilities.items() if available)) or "none observed",
+        ", ".join(unavailable) or "none observed",
+    )
+
+
 def _callback(interaction_id, token, payload):
     path = "/interactions/{}/{}/callback".format(interaction_id, urllib.parse.quote(token, safe=""))
     _rest_request("POST", path, payload, auth=False, timeout=2.5, max_retries=0)
@@ -1031,15 +1135,23 @@ def _handle_autocomplete(interaction):
     data = interaction.get("data") or {}
     member = interaction.get("member") or {}
     user = member.get("user") or interaction.get("user") or {}
-    if data.get("name") != "loadmission" or not _is_admin(
+    options = data.get("options") or []
+    focused = next((item for item in options if item.get("focused")), {})
+    query = str(focused.get("value", "")).lower()
+    command = data.get("name")
+    if command == "loadmission" and _is_admin(
             str(user.get("id", "")), [str(role) for role in member.get("roles", [])]):
-        choices = []
-    else:
-        options = data.get("options") or []
-        focused = next((item for item in options if item.get("focused")), {})
-        query = str(focused.get("value", "")).lower()
         choices = [{"name": item[:100], "value": item} for item in _mission_catalog
                    if query in item.lower()][:25]
+    elif command == "garrisons":
+        choices = [
+            {"name": "{} ({})".format(item["name"], item["type"])[:100], "value": marker}
+            for marker, item in _campaign.locations.items()
+            if item["owner"] == "Resistance"
+            and (query in item["name"].lower() or query in marker.lower())
+        ][:25]
+    else:
+        choices = []
     try:
         _callback(str(interaction.get("id", "")), str(interaction.get("token", "")),
                   {"type": 8, "data": {"choices": choices}})
@@ -1081,9 +1193,10 @@ def _handle_interaction(interaction):
         content = (
             "**Petros**\nAntistasi Ultimate server operations.\n\n"
             "Information: `/ping` `/status` `/players` `/campaign` `/territory` "
-            "`/locations` `/war` `/resources` `/missions` `/activity`\n"
+            "`/locations` `/war` `/resources` `/missions` `/activity` `/garrisons` "
+            "`/garage` `/towns` `/economy` `/assets` `/savestatus`\n"
             "Server: `/servermissions` `/loadmission` `/restartmission` `/missionselect`\n"
-            "Campaign: `/saves` `/loadsave` `/save` `/announce`"
+            "Campaign: `/saves` `/loadsave` `/save` `/announce` `/restart` `/server`"
         )
         _respond(parsed, content)
         return
@@ -1105,6 +1218,14 @@ def _handle_interaction(interaction):
 
     if command == "activity":
         _respond(parsed, "**Recent Campaign Activity**\n" + _campaign.activity_text())
+        return
+
+    if command == "savestatus":
+        _respond(parsed, _campaign.save_status_text(time.monotonic()))
+        return
+
+    if command == "server":
+        _respond(parsed, _server_status_text(), True)
         return
 
     if command not in SERVER_COMMANDS and not _sqf_bridge_ready():
@@ -1173,6 +1294,85 @@ def _enqueue_out(item, high=False):
         return True
 
 
+def schedule_restart(countdown=60):
+    """Accept one bounded save-before-restart workflow from validated SQF."""
+    global _restart
+    if isinstance(countdown, bool) or countdown not in RESTART_COUNTDOWNS:
+        return False
+    if not _config.get("RCON_PASSWORD"):
+        return False
+    now = time.monotonic()
+    with _restart_lock:
+        if _restart is not None:
+            return False
+        _restart = {
+            "phase": "countdown", "deadline": now + countdown,
+            "notices": {value for value in (300, 60, 30, 10) if value < countdown},
+        }
+    return True
+
+
+def _restart_tick(now):
+    global _restart
+    commands = []
+    failed = False
+    with _restart_lock:
+        state = _restart
+        if state is None:
+            return commands
+        if state["phase"] == "countdown":
+            remaining = max(0, int(state["deadline"] - now + 0.999))
+            due = sorted((value for value in state["notices"] if remaining <= value), reverse=True)
+            for value in due:
+                commands.append(["", "__restart_notice", [value]])
+                state["notices"].remove(value)
+            if now >= state["deadline"]:
+                state.update(phase="wait_start", deadline=now + 45.0)
+                commands.append(["", "__restart_save", []])
+        elif now >= state["deadline"]:
+            _restart = None
+            failed = True
+    if failed:
+        commands.append(["", "__restart_failed", []])
+        send_event("integration_health", "Scheduled restart cancelled: Antistasi save-state verification timed out.", [["Action", "No restart sent", True]])
+    return commands
+
+
+def restart_save_rejected():
+    """Cancel when mission-side preconditions reject the requested save."""
+    global _restart
+    with _restart_lock:
+        if _restart is None:
+            return False
+        _restart = None
+    try:
+        _incoming.put_nowait(["", "__restart_failed", []])
+    except queue.Full:
+        pass
+    send_event("integration_health", "Scheduled restart cancelled: Antistasi could not start the required save.", [["Action", "No restart sent", True]])
+    return True
+
+
+def observe_save(saving):
+    """Consume authoritative Antistasi save-state edges and gate fixed RCon restart."""
+    global _restart
+    if not isinstance(saving, bool):
+        return False
+    now = time.monotonic()
+    _campaign.observe_save(saving, now)
+    restart_ready = False
+    with _restart_lock:
+        if _restart is not None and _restart["phase"] == "wait_start" and saving:
+            _restart.update(phase="wait_complete", deadline=now + 300.0)
+        elif _restart is not None and _restart["phase"] == "wait_complete" and not saving:
+            _restart = None
+            restart_ready = True
+    if restart_ready:
+        if not _enqueue_out({"kind": "safe_restart"}, high=True):
+            send_event("integration_health", "Scheduled restart cancelled: the fixed RCon queue was unavailable.", [["Action", "No restart sent", True]])
+    return True
+
+
 def _rest_worker():
     global _rest_ready, _commands_ready
     backoffs = (1.0, 2.0, 5.0, 10.0, 30.0)
@@ -1212,6 +1412,12 @@ def _rest_worker():
             _out_event.wait(1.0)
             continue
         try:
+            if item["kind"] == "safe_restart":
+                try:
+                    _rcon_command("#restart")
+                except RuntimeError as exc:
+                    send_event("integration_health", "Saved campaign, but fixed RCon restart failed.", [["Error", str(exc), False]])
+                continue
             if item["kind"] == "rcon":
                 interaction_id = item["interaction_id"]
                 try:
@@ -1588,8 +1794,8 @@ def drain_commands(max_items=10):
         limit = max(1, min(int(max_items), 20))
     except (TypeError, ValueError):
         limit = 10
-    items = []
-    for _ in range(limit):
+    items = _restart_tick(time.monotonic())[:limit]
+    for _ in range(limit - len(items)):
         try:
             items.append(_incoming.get_nowait())
         except queue.Empty:
@@ -1712,6 +1918,13 @@ def observe_campaign(snapshot):
     set_bot_presence(snapshot.get("map", ""), snapshot.get("playerCount", 0),
                      snapshot.get("warLevel", -1))
     for event in _campaign.observe(snapshot, time.monotonic()):
+        send_event(event["kind"], event["description"], event["fields"])
+    return True
+
+
+def observe_territory(row):
+    """Consume one authoritative marker event through the campaign reconciler."""
+    for event in _campaign.observe_territory(row, time.monotonic()):
         send_event(event["kind"], event["description"], event["fields"])
     return True
 

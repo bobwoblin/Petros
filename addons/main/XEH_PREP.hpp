@@ -1,10 +1,15 @@
 PREP(formatDuration);
 PREP(formatTasks);
 PREP(getCapabilities);
+PREP(getGarage);
+PREP(getGarrisons);
 PREP(getLocation);
 PREP(getSnapshot);
 PREP(getTasks);
+PREP(getTowns);
 PREP(handleCommand);
+PREP(handleIntelCommand);
+PREP(handleTerritoryEvent);
 PREP(monitorCampaign);
 PREP(pollCommands);
 PREP(postInit);

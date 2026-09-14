@@ -6,15 +6,16 @@ The Python self-test covers bridge/protocol logic without Arma. Before release, 
 
 1. Start with CBA, Pythia, Petros, and Antistasi Ultimate. Confirm the Python bridge starts during `preStart` before a mission is loaded.
 2. Join the campaign and confirm `postInit` starts command polling and campaign monitoring once.
-3. Run the public Discord commands and check that they return current campaign/player data without admin actions.
+3. Run the public Discord commands. For `/garrisons`, compare overview/detail with player-owned map garrisons; for `/garage` and `/assets`, compare stored category/class counts; for `/towns`, test every order/filter; and compare `/economy` with the commander UI. Confirm none changes campaign state.
 4. Run each configured admin command with an authorized account, then confirm the same command is denied for an unauthorized account.
 5. Check save listing/loading and confirm campaign switching is refused after campaign start.
-6. Stop BattlEye RCon and confirm mission discovery/load/restart commands fail safely; restore RCon and confirm they recover.
-7. Restart the mission and server. Confirm CBA handlers stay single-instance and stale command/event payloads don't replay.
-8. Review RPT and bridge logs for secrets. Make sure tokens and RCon credentials never appear in logs.
-9. Begin with an already-running campaign and confirm no fake mission or territory events appear. Start and complete one mission, capture and lose one location, then verify `/missions`, `/activity`, notifications, and the after-action report agree without duplicates.
-10. Remove the last player, reconnect inside ten minutes, and confirm the session continues. Leave for more than ten minutes and confirm exactly one after-action report appears.
-11. Temporarily make one optional Antistasi capability unavailable in a test build and confirm one degraded health event, no poll spam, and continued operation of unaffected commands.
+6. Run `/savestatus`, manually `/save`, and observe idle → saving → idle plus start/completion times. Check the autosave countdown where enabled.
+7. Run `/restart` with each countdown. Confirm notices, one normal Antistasi save, an observed saving transition, then fixed restart. In a test build, prevent save start and completion separately; each must time out/cancel without RCon restart. Stop BattlEye RCon after a successful save and confirm the fixed restart fails safely. Restore RCon and confirm recovery.
+8. Restart the mission and server. Confirm CBA handlers stay single-instance and stale command/event payloads don't replay.
+9. Review RPT and bridge logs for secrets. Make sure tokens and RCon credentials never appear in logs.
+10. Begin with an already-running campaign and confirm no fake mission or territory events appear. Start and complete one mission, capture and lose one location, then verify `/missions`, `/activity`, notifications, and the after-action report agree without duplicates. Disable the marker listener in a test build and confirm the unchanged 12-second snapshot still reconciles ownership.
+11. Remove the last player, reconnect inside ten minutes, and confirm the session continues. Leave for more than ten minutes and confirm exactly one after-action report appears.
+12. Temporarily make each new optional Antistasi capability unavailable in a test build. Confirm its command gives a concise unsupported response, `/server` lists it as degraded, and unaffected commands continue.
 
 Standalone Rich Presence check (Windows and Discord desktop only; no Workshop upload, server update, mission, or `config.local.py`):
 

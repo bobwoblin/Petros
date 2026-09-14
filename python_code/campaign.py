@@ -36,6 +36,9 @@ class CampaignTracker:
         self.low_fps_samples = 0
         self.low_fps_alerted = False
         self.capability_alerts = set()
+        self.saving = None
+        self.last_save_started = None
+        self.last_save_completed = None
 
     @staticmethod
     def _tasks(snapshot):
@@ -81,6 +84,70 @@ class CampaignTracker:
 
     def _record(self, now, event):
         self.recent.appendleft({"time": now, **event})
+
+    def _track_session_event(self, event):
+        if self.session is None:
+            return
+        if event["kind"] == "territory_gain":
+            self.session["gained"].append(event["fields"][0][1])
+        elif event["kind"] == "territory_loss":
+            self.session["lost"].append(event["fields"][0][1])
+        elif event["kind"] == "mission_succeeded":
+            self.session["completed"] += 1
+        elif event["kind"] == "mission_failed":
+            self.session["failed"] += 1
+
+    def observe_save(self, saving, now):
+        """Record only authoritative Antistasi save-state edges."""
+        if not isinstance(saving, bool):
+            return False
+        if saving and self.saving is not True:
+            self.last_save_started = now
+        elif not saving and self.saving is True:
+            self.last_save_completed = now
+        self.saving = saving
+        if self.snapshot is not None:
+            self.snapshot["saving"] = saving
+        return True
+
+    def observe_territory(self, row, now):
+        """Apply one marker event; the next snapshot then reconciles without duplication."""
+        locations = self._locations({"locations": [row]})
+        if not locations:
+            return []
+        marker, current = next(iter(locations.items()))
+        previous = self.locations.get(marker)
+        self.locations[marker] = current
+        if previous is None or previous["owner"] == current["owner"]:
+            return []
+        old_locations = self.locations
+        self.locations = {marker: previous}
+        events = self._territory_events({marker: current})
+        self.locations = old_locations
+        for event in events:
+            self._track_session_event(event)
+            self._record(now, event)
+        return events
+
+    def save_status_text(self, now):
+        snapshot = self.snapshot or {}
+        capabilities = self._capabilities(snapshot)
+        supported = capabilities.get("save", False)
+        saving = self.saving if isinstance(self.saving, bool) else snapshot.get("saving", False)
+        def observed(value):
+            return "not observed since Petros started" if value is None else duration(now - value) + " ago"
+        autosave = snapshot.get("nextAutosave", -1)
+        autosave_text = duration(autosave) if isinstance(autosave, (int, float)) and autosave >= 0 else "unavailable"
+        state = "saving now" if saving else "idle"
+        if self.saving is None and not snapshot:
+            state = "not observed"
+        return (
+            "**Antistasi Save Status**\n"
+            "State: {}\nLast start: {}\nLast completion: {}\n"
+            "Next autosave: {}\nSave support: {}"
+        ).format(state, observed(self.last_save_started),
+                 observed(self.last_save_completed), autosave_text,
+                 "available" if supported else "unsupported")
 
     def _territory_events(self, locations):
         events = []
@@ -176,6 +243,10 @@ class CampaignTracker:
             self.locations = {}
             self.session = None
             self.empty_since = None
+            self.saving = None
+            self.last_save_started = None
+            self.last_save_completed = None
+        self.observe_save(snapshot.get("saving"), now)
         if self.snapshot is None:
             self.snapshot, self.tasks, self.locations = snapshot, tasks, locations
             if int(snapshot.get("playerCount", 0)) > 0:
@@ -218,16 +289,8 @@ class CampaignTracker:
             self.low_fps_alerted = False
             events.append(self._event("integration_recovered", "Server FPS recovered.", [["FPS", str(fps), True]]))
 
-        if self.session is not None:
-            for event in events:
-                if event["kind"] == "territory_gain":
-                    self.session["gained"].append(event["fields"][0][1])
-                elif event["kind"] == "territory_loss":
-                    self.session["lost"].append(event["fields"][0][1])
-                elif event["kind"] == "mission_succeeded":
-                    self.session["completed"] += 1
-                elif event["kind"] == "mission_failed":
-                    self.session["failed"] += 1
+        for event in events:
+            self._track_session_event(event)
 
         players = int(snapshot.get("playerCount", 0))
         if players > 0:
