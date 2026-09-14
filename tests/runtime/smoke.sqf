@@ -12,8 +12,11 @@ private _check = {
 } forEach [
     "petros_fnc_preStart",
     "petros_fnc_formatDuration",
+    "petros_fnc_getCapabilities",
     "petros_fnc_getLocation",
     "petros_fnc_getSnapshot",
+    "petros_fnc_formatTasks",
+    "petros_fnc_getTasks",
     "petros_fnc_handleCommand",
     "petros_fnc_monitorCampaign",
     "petros_fnc_pollCommands",
@@ -23,6 +26,11 @@ private _check = {
     "petros_fnc_stopRichPresence",
     "petros_fnc_updateRichPresence"
 ];
+
+private _capabilities = call petros_fnc_getCapabilities;
+["Antistasi capabilities are reported", _capabilities isEqualType [] && {count _capabilities >= 6}] call _check;
+private _tasks = call petros_fnc_getTasks;
+["Antistasi task adapter returns an array", _tasks isEqualType []] call _check;
 
 ["public rich presence config received", !(isNil "petros_richPresenceConfig") && {petros_richPresenceConfig isEqualType []}] call _check;
 

@@ -52,6 +52,11 @@ if (isNil QGVAR(commandPollPFH)) then {
     GVAR(commandPollPFH) = [{call FUNC(pollCommands)}, COMMAND_POLL_INTERVAL] call CBA_fnc_addPerFrameHandler;
 };
 
+// Antistasi publishes initialization through its supported CBA event wrapper.
+if !(isNil "A3A_fnc_addEventHandler") then {
+    ["A3A_event_serverInitDone", {call FUNC(startMonitoring)}] call A3A_fnc_addEventHandler;
+};
+
 [
     {
         (missionNamespace getVariable ["serverInitDone", false]) &&

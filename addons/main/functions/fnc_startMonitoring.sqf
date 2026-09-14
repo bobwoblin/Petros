@@ -17,13 +17,7 @@
 if (!isServer || {missionNamespace getVariable [QGVAR(monitoringStarted), false]}) exitWith {};
 missionNamespace setVariable [QGVAR(monitoringStarted), true];
 
-private _strategic = markersX - controlsX - ["Synd_HQ"];
-private _owners = createHashMap;
-{_owners set [_x, sidesX getVariable [_x, sideUnknown]]} forEach _strategic;
-missionNamespace setVariable [QGVAR(territoryOwners), _owners];
-
 private _lastWar = missionNamespace getVariable ["tierWar", -1];
-missionNamespace setVariable [QGVAR(lastWarLevel), _lastWar];
 
 addMissionEventHandler ["PlayerConnected", {
     params ["_id", "_uid", "_name"];

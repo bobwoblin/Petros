@@ -145,9 +145,9 @@ switch (_command) do {
         if (_ready) then {
             private _missions = _snapshot get "missions";
             _description = if (_missions isEqualTo []) then {
-                "No active Antistasi mission types are reported."
+                "No active Antistasi missions are reported."
             } else {
-                _missions joinString _newline
+                [_missions, _snapshot get "uptime"] call FUNC(formatTasks)
             };
             _fields = [["Count", str count _missions, true]];
         } else {

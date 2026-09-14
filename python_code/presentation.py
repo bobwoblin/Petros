@@ -48,9 +48,17 @@ EVENTS = {
         "description": "Resistance control lost.",
         "color": COLORS["error"],
     },
-    "war_increase": {
-        "title": "⚔️ War Level Increased",
-        "description": "The campaign War Level increased.",
+    "war_change": {
+        "title": "⚔️ War Level Changed",
+        "description": "The campaign War Level changed.",
         "color": COLORS["warning"],
     },
+    "mission_started": {"title": "Mission Started", "color": COLORS["default"]},
+    "mission_succeeded": {"title": "Mission Succeeded", "color": COLORS["success"]},
+    "mission_failed": {"title": "Mission Failed", "color": COLORS["error"]},
+    "mission_cancelled": {"title": "Mission Cancelled", "color": COLORS["neutral"]},
+    "session_report": {"title": "Campaign After-Action Report", "color": COLORS["default"]},
+    "commander_change": {"title": "Commander Changed", "color": COLORS["warning"]},
+    "integration_health": {"title": "Petros Health Warning", "color": COLORS["error"]},
+    "integration_recovered": {"title": "Petros Health Recovered", "color": COLORS["success"]},
 }

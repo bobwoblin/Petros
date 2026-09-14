@@ -20,7 +20,7 @@ Public commands:
 
 ```text
 /help /ping /status /players /campaign /territory
-/locations /war /resources /missions
+/locations /war /resources /missions /activity
 ```
 
 Admin server commands:
@@ -102,7 +102,21 @@ Petros's bot uses its existing Gateway connection and restores configured activi
 
 `/saves` reads the save catalog for the current map. `/loadsave` selects a save through Antistasi's normal start-game path and refuses campaign switching after the campaign has started.
 
-Direct access to Antistasi mission globals/save-selection functions is kept in a small number of marked call sites because those names can change upstream.
+The SQF compatibility adapter capability-checks Antistasi at runtime and produces one normalized snapshot containing campaign identity, tasks, territory, HR/resources, War Level, commander, players, and integration capabilities. Missing optional state degrades that feature and produces one health transition instead of stopping the bridge.
+
+Petros reads Antistasi Ultimate's server-owned `A3A_tasksData` records through one marked compatibility function. The upstream record is `[task ID, type, state, creation time]`; Petros derives durations and reports mission starts, success, failure, or deletion without integrating with every mission script. `/missions` shows the richer live records. Existing tasks and territory form a silent baseline on startup or campaign change, so a bridge restart does not manufacture events.
+
+Petros subscribes to Antistasi Ultimate's supported `A3A_fnc_addEventHandler` wrapper for `A3A_event_serverInitDone`, with the existing readiness check retained for late loading and reconciliation. The centralized task updater and territory ownership changes do not publish corresponding authoritative events, so Petros retains the existing 12-second snapshot/diff monitor for those transitions rather than patching Antistasi or increasing polling frequency.
+
+The same normalized territory transition feeds notifications, the current play-session summary, and `/activity`. Recent activity is memory-only and bounded to 75 strategic events. It excludes kill, AI, garrison, and resource-tick noise.
+
+A play session starts when the server changes from no human players to at least one. It ends after ten player-free minutes, allowing reconnects without splitting the session. The after-action report includes duration, peak players, territory gains/losses, War Level, HR/resources deltas, mission outcomes, and changed strategic locations. Sessions, task deduplication, and recent activity intentionally reset when Petros restarts and are not persisted.
+
+Health monitoring reports missing task/territory/resource capabilities once per degraded transition and uses three consecutive sub-10 FPS snapshots plus a 15 FPS recovery threshold. Discord Gateway and REST health remain visible in `/ping`; RCon availability is reported by the fixed commands that actually use it. Petros does not claim it can notify Discord while the Discord connection or SQF/Pythia bridge itself is unavailable.
+
+`/loadmission` has admin-scoped autocomplete sourced from the live Antistasi `CfgMissions` catalog. Autocomplete is convenience only: the existing authorization, character validation, and fixed RCon command path remain authoritative.
+
+Direct access to Antistasi mission globals/save-selection functions remains confined to the compatibility adapter and marked save call sites because those names can change upstream. Campaign victory/completion is deliberately unsupported in this pass because current Antistasi source does not expose one reliable server-owned completion state or event for Petros to consume.
 
 ## Dependencies and deployment
 
@@ -127,7 +141,7 @@ hemtt check --pedantic
 hemtt build
 ```
 
-The Python self-test covers command validation/authorization, Discord transport, Discord Rich Presence IPC framing, BattlEye RCon framing and fragmentation, mission discovery, command registration, limits, typed options, and the standard-library-only runtime requirement.
+The Python self-test covers command validation/authorization, Discord transport, Discord Rich Presence IPC framing, BattlEye RCon framing and fragmentation, mission discovery/autocomplete, campaign baselining, task and territory transitions, session summaries, health hysteresis, recent-activity bounds, command registration, limits, typed options, and the standard-library-only runtime requirement.
 
 See `tests/runtime/README.md` for runtime checks.
 

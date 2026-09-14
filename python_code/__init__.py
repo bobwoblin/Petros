@@ -21,13 +21,15 @@ import urllib.parse
 import urllib.request
 import zlib
 
+from .campaign import CampaignTracker
+
 API_BASE = "https://discord.com/api/v10"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 USER_AGENT = "Petros/1.0 (Antistasi Ultimate Discord bridge)"
 
 INFO_COMMANDS = {
     "help", "ping", "status", "players", "campaign", "territory",
-    "locations", "war", "resources", "missions",
+    "locations", "war", "resources", "missions", "activity",
 }
 SERVER_COMMANDS = {"servermissions", "loadmission", "restartmission", "missionselect"}
 MANAGEMENT_COMMANDS = {"save", "announce", "saves", "loadsave"} | SERVER_COMMANDS
@@ -49,7 +51,15 @@ EVENT_SETTINGS = {
     "player_leave": "NOTIFY_PLAYER_LEAVES",
     "territory_gain": "NOTIFY_TERRITORY",
     "territory_loss": "NOTIFY_TERRITORY",
-    "war_increase": "NOTIFY_WAR_LEVEL",
+    "war_change": "NOTIFY_WAR_LEVEL",
+    "commander_change": "NOTIFY_MILESTONES",
+    "mission_started": "NOTIFY_MISSIONS",
+    "mission_succeeded": "NOTIFY_MISSIONS",
+    "mission_failed": "NOTIFY_MISSIONS",
+    "mission_cancelled": "NOTIFY_MISSIONS",
+    "session_report": "NOTIFY_SESSION_REPORTS",
+    "integration_health": "NOTIFY_HEALTH",
+    "integration_recovered": "NOTIFY_HEALTH",
 }
 
 _PRESENTATION_DEFAULTS = {
@@ -96,6 +106,10 @@ _DEFAULTS = {
     "NOTIFY_PLAYER_LEAVES": True,
     "NOTIFY_TERRITORY": True,
     "NOTIFY_WAR_LEVEL": True,
+    "NOTIFY_MISSIONS": True,
+    "NOTIFY_SESSION_REPORTS": True,
+    "NOTIFY_MILESTONES": True,
+    "NOTIFY_HEALTH": True,
 }
 
 _config = dict(_DEFAULTS)
@@ -133,6 +147,7 @@ _presence_wake = threading.Event()
 _presence_last_activity = None
 _presence_diagnostics = {}
 _bot_campaign = None
+_campaign = CampaignTracker()
 
 
 def _presence_log(stage, message):
@@ -490,6 +505,8 @@ def _load_config():
     for key in (
         "NOTIFY_SERVER_ONLINE", "NOTIFY_PLAYER_JOINS",
         "NOTIFY_PLAYER_LEAVES", "NOTIFY_TERRITORY", "NOTIFY_WAR_LEVEL",
+        "NOTIFY_MISSIONS", "NOTIFY_SESSION_REPORTS", "NOTIFY_MILESTONES",
+        "NOTIFY_HEALTH",
     ):
         cfg[key] = bool(cfg[key])
 
@@ -631,6 +648,7 @@ def _commands_payload():
         "war": "Show the current War Level.",
         "resources": "Show current resistance resources.",
         "missions": "Show currently active Antistasi mission types.",
+        "activity": "Show recent meaningful Antistasi campaign activity.",
         "servermissions": "List Arma multiplayer missions available to the server. Admin only.",
         "loadmission": "Load an Arma multiplayer mission by template name. Admin only.",
         "restartmission": "Restart the currently loaded Arma mission. Admin only.",
@@ -668,6 +686,7 @@ def _commands_payload():
                 "required": True,
                 "min_length": 1,
                 "max_length": 160,
+                "autocomplete": True,
             }]
         elif name == "loadsave":
             command["options"] = [{
@@ -1002,7 +1021,36 @@ def _respond(interaction, content, ephemeral=False):
         _log("Interaction response failed")
 
 
+def _handle_autocomplete(interaction):
+    if not isinstance(interaction, dict) or interaction.get("type") != 4:
+        return False
+    if (str(interaction.get("guild_id", "")) != _config["GUILD_ID"] or
+            (_config["COMMAND_CHANNEL_ID"] and
+             str(interaction.get("channel_id", "")) != _config["COMMAND_CHANNEL_ID"])):
+        return True
+    data = interaction.get("data") or {}
+    member = interaction.get("member") or {}
+    user = member.get("user") or interaction.get("user") or {}
+    if data.get("name") != "loadmission" or not _is_admin(
+            str(user.get("id", "")), [str(role) for role in member.get("roles", [])]):
+        choices = []
+    else:
+        options = data.get("options") or []
+        focused = next((item for item in options if item.get("focused")), {})
+        query = str(focused.get("value", "")).lower()
+        choices = [{"name": item[:100], "value": item} for item in _mission_catalog
+                   if query in item.lower()][:25]
+    try:
+        _callback(str(interaction.get("id", "")), str(interaction.get("token", "")),
+                  {"type": 8, "data": {"choices": choices}})
+    except RuntimeError:
+        _log("Autocomplete response failed")
+    return True
+
+
 def _handle_interaction(interaction):
+    if _handle_autocomplete(interaction):
+        return
     ok, reason, parsed = _validate_interaction(interaction)
     if not ok:
         if reason in ("wrong_guild", "interaction_type"):
@@ -1033,7 +1081,7 @@ def _handle_interaction(interaction):
         content = (
             "**Petros**\nAntistasi Ultimate server operations.\n\n"
             "Information: `/ping` `/status` `/players` `/campaign` `/territory` "
-            "`/locations` `/war` `/resources` `/missions`\n"
+            "`/locations` `/war` `/resources` `/missions` `/activity`\n"
             "Server: `/servermissions` `/loadmission` `/restartmission` `/missionselect`\n"
             "Campaign: `/saves` `/loadsave` `/save` `/announce`"
         )
@@ -1053,6 +1101,10 @@ def _handle_interaction(interaction):
             "configured" if _config.get("RCON_PASSWORD") else "not configured",
         )
         _respond(parsed, content)
+        return
+
+    if command == "activity":
+        _respond(parsed, "**Recent Campaign Activity**\n" + _campaign.activity_text())
         return
 
     if command not in SERVER_COMMANDS and not _sqf_bridge_ready():
@@ -1645,6 +1697,22 @@ def set_bot_presence(map_name="", players=0, war=-1):
     if players < 0 or war < -1:
         return False
     _bot_campaign = (_clip(map_name, 64), players, war) if map_name else None
+    return True
+
+
+def observe_campaign(snapshot):
+    """Consume one authoritative SQF snapshot and queue meaningful transitions."""
+    if isinstance(snapshot, (list, tuple)):
+        try:
+            snapshot = dict(snapshot)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(snapshot, dict):
+        return False
+    set_bot_presence(snapshot.get("map", ""), snapshot.get("playerCount", 0),
+                     snapshot.get("warLevel", -1))
+    for event in _campaign.observe(snapshot, time.monotonic()):
+        send_event(event["kind"], event["description"], event["fields"])
     return True
 
 

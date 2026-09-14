@@ -1,6 +1,9 @@
 PREP(formatDuration);
+PREP(formatTasks);
+PREP(getCapabilities);
 PREP(getLocation);
 PREP(getSnapshot);
+PREP(getTasks);
 PREP(handleCommand);
 PREP(monitorCampaign);
 PREP(pollCommands);

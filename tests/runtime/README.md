@@ -12,6 +12,9 @@ The Python self-test covers bridge/protocol logic without Arma. Before release, 
 6. Stop BattlEye RCon and confirm mission discovery/load/restart commands fail safely; restore RCon and confirm they recover.
 7. Restart the mission and server. Confirm CBA handlers stay single-instance and stale command/event payloads don't replay.
 8. Review RPT and bridge logs for secrets. Make sure tokens and RCon credentials never appear in logs.
+9. Begin with an already-running campaign and confirm no fake mission or territory events appear. Start and complete one mission, capture and lose one location, then verify `/missions`, `/activity`, notifications, and the after-action report agree without duplicates.
+10. Remove the last player, reconnect inside ten minutes, and confirm the session continues. Leave for more than ten minutes and confirm exactly one after-action report appears.
+11. Temporarily make one optional Antistasi capability unavailable in a test build and confirm one degraded health event, no poll spam, and continued operation of unaffected commands.
 
 Standalone Rich Presence check (Windows and Discord desktop only; no Workshop upload, server update, mission, or `config.local.py`):
 

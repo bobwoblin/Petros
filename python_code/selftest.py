@@ -4,12 +4,16 @@ import importlib.util
 import json
 from pathlib import Path
 import struct
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("petros_core", HERE / "__init__.py")
+SPEC = importlib.util.spec_from_file_location(
+    "Petros", HERE / "__init__.py", submodule_search_locations=[str(HERE)]
+)
 PETROS = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = PETROS
 SPEC.loader.exec_module(PETROS)
 
 
@@ -133,6 +137,7 @@ class PetrosSelfTest(unittest.TestCase):
         PETROS._presence_last_activity = None
         PETROS._presence_diagnostics.clear()
         PETROS._bot_campaign = None
+        PETROS._campaign = PETROS.CampaignTracker()
         self.cfg = dict(PETROS._DEFAULTS)
         self.cfg.update({
             "GUILD_ID": "100",
@@ -824,6 +829,85 @@ class PetrosSelfTest(unittest.TestCase):
             PETROS.LOCATION_VALUES,
         )
         self.assertTrue(all("integration_types" not in command and "contexts" not in command for command in commands))
+
+    def test_campaign_baseline_transitions_and_deduplication(self):
+        tracker = PETROS.CampaignTracker(idle_grace=10)
+        base = {
+            "map": "Kujari", "campaignId": "7", "playerCount": 1, "uptime": 100,
+            "warLevel": 2, "hr": 10, "resources": 1000, "commander": "Austin",
+            "fps": 40, "capabilities": [["tasks", True], ["territory", True], ["resources", True]],
+            "missions": [["task-1", "RES", "CREATED", 90]],
+            "locations": [["airport_1", "Kujari Airport", "Airport", "Occupants", "123456"]],
+        }
+        self.assertEqual(tracker.observe(base, 0), [])
+        changed = dict(base)
+        changed.update({
+            "uptime": 160, "warLevel": 3, "hr": 15, "resources": 1200,
+            "missions": [["task-1", "RES", "SUCCEEDED", 90]],
+            "locations": [["airport_1", "Kujari Airport", "Airport", "Resistance", "123456"]],
+        })
+        events = tracker.observe(changed, 60)
+        self.assertEqual(
+            {event["kind"] for event in events},
+            {"territory_gain", "mission_succeeded", "war_change"},
+        )
+        self.assertEqual(tracker.observe(changed, 72), [])
+        self.assertEqual(tracker.session["completed"], 1)
+        self.assertEqual(tracker.session["gained"], ["Kujari Airport"])
+
+    def test_campaign_session_recent_bound_and_health_hysteresis(self):
+        tracker = PETROS.CampaignTracker(idle_grace=10, recent_limit=3)
+        base = {
+            "map": "Altis", "campaignId": "1", "playerCount": 1, "uptime": 0,
+            "warLevel": 1, "hr": 10, "resources": 100, "commander": "None", "fps": 9,
+            "capabilities": [["tasks", True], ["territory", True], ["resources", True]],
+            "missions": [], "locations": [],
+        }
+        tracker.observe(base, 0)
+        tracker.observe(dict(base, fps=8), 12)
+        self.assertEqual(tracker.observe(dict(base, fps=7, playerCount=0), 24), [])
+        events = tracker.observe(dict(base, fps=6, playerCount=0), 36)
+        self.assertEqual([event["kind"] for event in events], ["integration_health", "session_report"])
+        events = tracker.observe(dict(base, fps=20, playerCount=0), 48)
+        self.assertEqual([event["kind"] for event in events], ["integration_recovered"])
+        self.assertLessEqual(len(tracker.recent), 3)
+        self.assertIn("Session Report", tracker.activity_text())
+
+    def test_campaign_capability_health_recovers_once(self):
+        tracker = PETROS.CampaignTracker()
+        base = {
+            "map": "Altis", "campaignId": "1", "playerCount": 0, "uptime": 0,
+            "warLevel": 1, "hr": 10, "resources": 100, "commander": "None", "fps": 40,
+            "capabilities": [["tasks", True], ["territory", True], ["resources", True]],
+            "missions": [], "locations": [],
+        }
+        tracker.observe(base, 0)
+        degraded = dict(base, capabilities=[["tasks", False], ["territory", True], ["resources", True]])
+        self.assertEqual([event["kind"] for event in tracker.observe(degraded, 12)], ["integration_health"])
+        self.assertEqual(tracker.observe(degraded, 24), [])
+        self.assertEqual([event["kind"] for event in tracker.observe(base, 36)], ["integration_recovered"])
+
+    def test_sqf_campaign_payload_accepts_key_value_pairs(self):
+        with patch.object(PETROS, "_campaign") as tracker, \
+                patch.object(PETROS, "set_bot_presence", return_value=True):
+            tracker.observe.return_value = []
+            self.assertTrue(PETROS.observe_campaign([
+                ["map", "Altis"], ["playerCount", 0], ["warLevel", 1]
+            ]))
+        self.assertEqual(tracker.observe.call_args.args[0]["map"], "Altis")
+
+    def test_mission_autocomplete_is_admin_scoped(self):
+        PETROS.set_missions(["Antistasi_Altis.Altis", "Antistasi_Kujari.Kujari"])
+        interaction = self.interaction(command="loadmission", user="1")
+        interaction["type"] = 4
+        interaction["data"]["options"] = [{"name": "mission", "type": 3, "value": "kuj", "focused": True}]
+        calls = []
+        with patch.object(PETROS, "_config", self.cfg), \
+                patch.object(PETROS, "_callback", side_effect=lambda *args: calls.append(args)):
+            self.assertTrue(PETROS._handle_autocomplete(interaction))
+        self.assertEqual(calls[0][2]["data"]["choices"], [
+            {"name": "Antistasi_Kujari.Kujari", "value": "Antistasi_Kujari.Kujari"}
+        ])
 
     def test_no_extra_runtime_dependencies(self):
         source = (HERE / "__init__.py").read_text(encoding="utf-8")
